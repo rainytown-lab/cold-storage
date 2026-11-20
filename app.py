@@ -45,7 +45,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 12
+API_VERSION = 13
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -283,10 +283,16 @@ def clean_layout(layout, from_level, chain=LEVELS):
     out = {}
     start = chain.index(from_level)
     boxes_total = 1
+    # Loose-space sections per shelf (or in a tank), each optionally starting with some containers —
+    # for fridges and tanks that don't hold racks at all.
+    out["sections"] = as_int(layout.get("sections") or 0, "Loose-space sections", 0, 20)
+    out["containers"] = as_int(layout.get("containers") or 0, "Containers per section", 0, 50)
+    out["container_type"] = text(layout, "container_type", 60)
+    require(not out["containers"] or out["container_type"], "Pick a container type")
     for lvl in chain[start:]:
         key = LAYOUT_KEYS[lvl]
-        out[key] = as_int(layout.get(key), key.capitalize(), 0 if lvl != from_level else 1,
-                          LAYOUT_MAX[key], allow_none=False)
+        lowest = 1 if lvl == from_level and not (lvl == "rack" and out["sections"]) else 0
+        out[key] = as_int(layout.get(key) or 0, key.capitalize(), lowest, LAYOUT_MAX[key], allow_none=False)
         boxes_total *= max(out[key], 0)
     out["grid_rows"] = as_int(layout.get("grid_rows") or 9, "Box rows", 1, MAX_GRID)
     out["grid_cols"] = as_int(layout.get("grid_cols") or 9, "Box columns", 1, MAX_GRID)
@@ -294,6 +300,20 @@ def clean_layout(layout, from_level, chain=LEVELS):
     require(boxes_total <= MAX_BOXES_PER_UNIT,
             f"That layout makes {boxes_total} boxes — the limit is {MAX_BOXES_PER_UNIT}.")
     return out
+
+
+def add_sections(conn, unit_id, holder_ids, layout):
+    """Add the layout's loose-space sections (and their starting containers) to each holder:
+    each new shelf, or the tank itself (None). They go after any racks already there."""
+    for hid in holder_ids:
+        for _ in range(layout.get("sections") or 0):
+            pos = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM nodes WHERE unit_id = ? AND parent_id IS ?",
+                               (unit_id, hid)).fetchone()[0]
+            sp = conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, span) VALUES (?,?, 'space', ?, 1)",
+                              (unit_id, hid, pos)).lastrowid
+            for k in range(layout.get("containers") or 0):
+                conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, kind) VALUES (?,?, 'bin', ?, ?)",
+                             (unit_id, sp, k, layout["container_type"]))
 
 
 def build_nodes(conn, unit_id, parent_id, level, count, layout, start_pos=0, chain=LEVELS):
@@ -700,6 +720,10 @@ def create_unit(ctx):
                        tuple(f.values()))
     uid = cur.lastrowid
     build_nodes(conn, uid, None, chain[0], layout[LAYOUT_KEYS[chain[0]]], layout, 0, chain)
+    if layout["sections"]:
+        holders = ([r[0] for r in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND level = 'shelf' ORDER BY position, id", (uid,))]
+                   if chain[0] == "shelf" else [None])
+        add_sections(conn, uid, holders, layout)
     if plan:   # racks take the slot names (A1, A2, …) in slot order
         racks = conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS NULL ORDER BY position, id", (uid,)).fetchall()
         for i, (rid,) in enumerate(racks):
@@ -814,11 +838,16 @@ def add_nodes(ctx):
         require(parent and parent["level"] == "space", "Containers go in a loose space")
         kind = text(b, "kind", 60)
         require(kind, "Pick a container type")
-        cur = conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, kind, name) VALUES (?,?,?,?,?,?)",
-                           (uid, parent_id, "bin", _next_pos(conn, uid, parent_id), kind, text(b, "name", 80)))
-        log(ctx, "node.add", f"Added a {kind.lower()}" + (f" “{text(b, 'name', 80)}”" if text(b, "name", 80) else ""), unit_id=uid)
+        count = as_int(b.get("count") or 1, "Number of containers", 1, 50)
+        name = text(b, "name", 80) if count == 1 else None      # several at once are numbered: Box 1, Box 2…
+        ids = []
+        for _ in range(count):
+            ids.append(conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, kind, name) VALUES (?,?,?,?,?,?)",
+                                    (uid, parent_id, "bin", _next_pos(conn, uid, parent_id), kind, name)).lastrowid)
+        log(ctx, "node.add", (f"Added {count} {kind.lower()}s" if count > 1 else f"Added a {kind.lower()}")
+            + (f" “{name}”" if name else ""), unit_id=uid)
         conn.commit()
-        return {"ids": [cur.lastrowid]}
+        return {"ids": ids}
     if b.get("level") == "space":
         # Loose spaces take the place of whatever normally sits there: racks on a shelf (or in a
         # tank), rows in a rack, boxes in a row (or in a tank rack).
@@ -853,6 +882,8 @@ def add_nodes(ctx):
                          (slot_name if slot_name and not taken else _free_name(conn, uid, parent_id, "Rack", ids[-1]), ids[-1]))
     else:
         ids = build_nodes(conn, uid, parent_id, level, count, layout, _next_pos(conn, uid, parent_id), chain)
+        if level == "shelf" and layout["sections"]:
+            add_sections(conn, uid, ids, layout)
     log(ctx, "node.add", f"Added {count} {LEVEL_LABEL[level].lower()}{'s' if count > 1 else ''}", unit_id=uid)
     conn.commit()
     return {"ids": ids}

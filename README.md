@@ -42,6 +42,12 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   rack is a vertical stack of boxes (box 1 at the top). You set racks and boxes per
   rack when you add a tank. Tanks made by earlier versions are converted
   automatically on startup, and their items stay in their boxes.
+- **Fridges without racks**: when adding a unit, choose what goes on each shelf (or
+  in a tank): **Racks**, **Loose space only** (e.g. an under-counter fridge or a dry
+  shipper), or **Both**. Loose space is set up as a number of sections per shelf,
+  each optionally starting with a number of containers of one type (e.g. 3 Boxes).
+  "+4 °C fridge" defaults to loose space. "+ Add shelf" offers the same, and
+  "+ Add container" can add several at once.
 - **Freezer/fridge layout**: unit › shelf › rack › row › box › position. You set the counts when
   you create a unit, and a live preview shows the result. After that you can add,
   delete, rename or reassign any shelf, rack, row or box, and resize a box
@@ -91,10 +97,12 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   can't be merged.
 - **Navigation**: a "← Back to …" button in the top-left corner goes up one level,
   with the breadcrumb beside it.
-- **Drag & drop**: drag racks and loose spaces to reorder them or move them to
-  another shelf. This works in the freezer front view and the LN₂ top view; on a
-  phone, long-press first. A rack or space keeps its name when it moves. The side
-  panel also has "Move left / right" and "Shelf" controls.
+- **Drag & drop**: everything is positioned by dragging. Drag racks and loose
+  spaces along a shelf or to another shelf (in an LN₂ tank, around the tank), rows
+  up and down in a rack (by their label), boxes along a row or into another row, and
+  containers within a loose space. On a phone, long-press first. Pieces keep their
+  names when they move; if the name is taken where they land, they get the next
+  free number.
 - **You are here**: inside a shelf, rack, row or box, a small freezer-shaped map
   in the header highlights your shelf and rack. Click it to jump.
 - **Move**: open an item, click Move, then click an empty position in any box in

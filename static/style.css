@@ -652,3 +652,22 @@ h1 { font-size: 26px; font-weight: 750; }
 .bin-frame { background: var(--surface-2); border-style: solid; }
 .bin-head { flex-wrap: wrap; row-gap: 4px; }
 .bin-head .bin-kind { order: -1; }
+
+/* Dragging rows, row-level spaces and containers */
+[data-dnd] .rack-frame > .rack-row[data-drag] > .row-lbl, [data-dnd] .rack-row.space-row, [data-dnd] .bin-card { cursor: grab; }
+.rack-row.drop-before-v { box-shadow: 0 -4px 0 0 var(--primary); }
+.rack-row.drop-after-v { box-shadow: 0 4px 0 0 var(--primary); }
+.bin-card.drop-before { box-shadow: -4px 0 0 0 var(--primary); }
+.bin-card.drop-after { box-shadow: 4px 0 0 0 var(--primary); }
+.rack-frame.drop-into, .bins.drop-into { outline: 2px dashed var(--primary); outline-offset: 2px; }
+.rack-frame > .rack-hint { flex: none; margin: 4px 2px 0; color: var(--text-soft); }
+/* The sign-in page has no navy bar behind the brand */
+.auth .brand { color: var(--text); }
+
+/* Layout mode picker (racks / loose space / both) */
+.mode-pick { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 6px; }
+.mode-opt { display: flex; flex-direction: column; gap: 2px; text-align: left; padding: 10px 12px; border: 2px solid var(--border); border-radius: 10px; background: var(--surface); }
+.mode-opt b { font-size: 14px; }
+.mode-opt span { font-size: 12px; color: var(--text-soft); }
+.mode-opt.on { border-color: var(--primary); background: var(--primary-soft); }
+@media (max-width: 560px) { .mode-pick { grid-template-columns: 1fr; } }
