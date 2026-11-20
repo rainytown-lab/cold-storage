@@ -61,6 +61,15 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   It sits in line with the racks and is 1–N rack-widths wide. Open an empty rack
   and click "Replace with loose space" (or the reverse) to swap one for the other
   in the same spot.
+- **Selecting several racks**: shift-click racks or loose spaces (or click "Select
+  racks" and then click them) to select several on one shelf or in one tank.
+  "Make one loose space" turns side-by-side selected pieces into a single loose space
+  as wide as all of them (the racks must be empty). "Make into racks" turns
+  selected loose spaces back into racks, one per rack-width. Dragging any selected
+  piece moves the whole group, in order.
+- **Editing the layout**: a unit's Details › Edit page lists what's on each shelf
+  (or in the tank) and has "+ Add shelf" / "+ Add rack", "+ Add loose space",
+  "Save as preset" and Delete. Individual pieces are changed from the diagram.
 - **Merging loose spaces**: when two loose spaces sit side by side, either
   one's panel offers "Merge with …". The left one stays, the widths add up, and
   the other's items move over. Arranged tanks have fixed slots, so their spaces

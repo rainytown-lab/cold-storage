@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 6;   // must match API_VERSION in app.py
+const API_VERSION = 7;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
 // Levels per storage type. LN2 tanks have no shelves or rows: racks stand in the tank and
@@ -44,6 +44,7 @@ const state = {
   moving: null,                 // {id, name} while an item is being moved
   highlight: '',                // owner filter in the diagram: '' | 'common' | userId
   boxSel: { box: null, cells: new Set(), on: false },
+  pieceSel: { unit: null, holder: null, ids: new Set(), on: false },   // selected racks / loose spaces
   renderSeq: 0,
 };
 
@@ -270,6 +271,12 @@ async function refresh() {
 window.addEventListener('hashchange', () => { route().then(() => window.scrollTo(0, 0)); });
 document.addEventListener('click', e => {
   if (Date.now() < dnd.suppressClickUntil) { e.preventDefault(); e.stopPropagation(); return; }
+  const piece = e.target.closest('[data-piece]');
+  if (piece && piece.closest('[data-dnd]') && (state.pieceSel.on || e.shiftKey || e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    togglePiece(+piece.dataset.piece, piece.closest('[data-drop-parent]')?.dataset.dropParent ?? null);
+    return;
+  }
   const t = e.target.closest('[data-href]');
   if (t && !e.defaultPrevented) { e.preventDefault(); location.hash = t.dataset.href; }
 });
@@ -286,7 +293,15 @@ function dndStart() {
   st.active = true;
   st.src.classList.add('dragging');
   document.body.classList.add('is-dragging');
-  const label = st.src.querySelector('.lbl span')?.textContent || st.src.querySelector('title')?.textContent.split(' — ')[0] || 'Rack';
+  const zone = st.src.closest('[data-drop-parent]');
+  const sel = state.pieceSel;
+  // Dragging one of several selected racks/spaces moves the whole group (not in fixed-slot tanks).
+  if (sel.ids.size > 1 && sel.ids.has(st.id) && !zone.dataset.plan) {
+    const els = [...zone.querySelectorAll('[data-piece]')].filter(el => sel.ids.has(+el.dataset.piece));
+    st.group = els.map(el => +el.dataset.piece);
+    els.forEach(el => el.classList.add('dragging'));
+  }
+  const label = st.group ? `${st.group.length} pieces` : st.src.querySelector('.lbl span')?.textContent || st.src.querySelector('title')?.textContent.split(' — ')[0] || 'Rack';
   st.ghost = h('div', { class: 'drag-ghost', style: { left: st.x + 'px', top: st.y + 'px' } }, label);
   document.body.append(st.ghost);
   if (navigator.vibrate && st.touch) navigator.vibrate(15);
@@ -307,18 +322,19 @@ function dndTarget(x, y) {
     else if (slotEl && zone.contains(slotEl)) { slotEl.classList.add('drop-swap'); st.target = { parent, slot: +slotEl.dataset.slot }; }
     return;
   }
-  if (tile && tile !== st.src && zone.contains(tile)) {
+  const own = t => t === st.src || (st.group && st.group.includes(+t.dataset.drag));
+  if (tile && !own(tile) && zone.contains(tile)) {
     const r = tile.getBoundingClientRect();
     const vertical = getComputedStyle(tile.parentElement).flexDirection === 'column';
     const after = vertical ? y > r.top + r.height / 2 : x > r.left + r.width / 2;
-    const order = [...zone.querySelectorAll('[data-drag]')].filter(t => t !== st.src);
+    const order = [...zone.querySelectorAll('[data-drag]')].filter(t => !own(t));
     const idx = order.indexOf(tile);
     const before = after ? (order[idx + 1] ? +order[idx + 1].dataset.drag : null) : +tile.dataset.drag;
     tile.classList.add((after ? 'drop-after' : 'drop-before') + (vertical ? '-v' : ''), after ? 'drop-after' : 'drop-before');
     st.target = { parent, before };
-  } else if (!tile || tile === st.src) {
+  } else if (!tile || own(tile)) {
     zone.classList.add('drop-into');
-    st.target = tile === st.src ? null : { parent, before: null };
+    st.target = tile && own(tile) ? null : { parent, before: null };
   }
 }
 function dndEnd(commit) {
@@ -328,12 +344,17 @@ function dndEnd(commit) {
   clearTimeout(st.timer);
   if (!st.active) return;
   dnd.suppressClickUntil = Date.now() + 400;
-  st.src.classList.remove('dragging');
+  for (const el of document.querySelectorAll('.dragging')) el.classList.remove('dragging');
   document.body.classList.remove('is-dragging');
   st.ghost?.remove();
   dndClear();
   if (!commit || !st.target) return;
   const t = st.target;
+  if (st.group) {
+    attempt(() => api('POST', '/api/nodes/place-many', { ids: st.group, parent_id: t.parent || null, before_id: t.before }))
+      .then(r => { if (r) toast(r.renamed && r.renamed.length ? `Moved — renamed ${r.renamed.join(', ')} (names were taken there)` : `Moved ${st.group.length} together`); refresh(); });
+    return;
+  }
   if (t.swap_with != null || t.slot != null) {
     attempt(() => api('POST', `/api/nodes/${st.id}/place`, { parent_id: t.parent, swap_with: t.swap_with, slot: t.slot }))
       .then(r => { if (r) toast(t.swap_with != null ? 'Swapped' : 'Moved'); refresh(); });
@@ -647,6 +668,7 @@ async function viewUnit(uid, nid, query) {
   const node = nid ? m.nodes.get(nid) : null;
   if (nid && !node) throw new Error('That part of the layout no longer exists.');
   const t = TYPES[m.unit.type];
+  if (state.pieceSel.unit !== uid) state.pieceSel = { unit: uid, holder: null, ids: new Set(), on: false };
   if (!node || node.level !== 'box' || state.boxSel.box !== node.id) state.boxSel = { box: node?.level === 'box' ? node.id : null, cells: new Set(), on: false };
 
   const chain = node ? chainOf(m, node.id) : [];
@@ -684,7 +706,8 @@ async function viewUnit(uid, nid, query) {
       h('div', { class: 'titles' }, h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('h1', null, title)), h('p', null, sub)),
       node ? null : h('a', { class: 'btn', href: `#/unit/${uid}/edit` }, 'Edit details')),
     h('div', { class: 'unit-layout' },
-      h('div', { class: 'diagram', 'data-dnd': true, 'data-unit': uid }, h('div', { class: 'toolbar' }, hl, legend(m), h('span', { class: 'spacer' })), diagram),
+      h('div', { class: 'diagram', 'data-dnd': true, 'data-unit': uid }, h('div', { class: 'toolbar' }, hl, legend(m), h('span', { class: 'spacer' })),
+        !node || node.level === 'shelf' ? pieceToolbar(m) : null, diagram),
       h('div', { class: 'side' }, node ? nodeSide(m, node) : unitSide(m))));
 }
 /** "You are here": a tiny map of the whole unit (and of the rack, once inside one), current spot highlighted. */
@@ -738,6 +761,68 @@ function locator(m, node) {
     h('span', null, [shelf, piece].filter(Boolean).map(nodeLabel).join(' · ') || m.unit.name))];
   return h('div', { class: 'locator', 'aria-label': 'Where you are in this unit' }, h('div', { class: 'loc-title' }, 'You are here'), h('div', { class: 'loc-parts' }, parts));
 }
+// ---------- Selecting several racks / loose spaces ----------
+function togglePiece(id, holder) {
+  const sel = state.pieceSel;
+  if (sel.ids.size && sel.holder !== holder) sel.ids.clear();   // one shelf (or tank) at a time
+  sel.holder = holder;
+  sel.ids.has(id) ? sel.ids.delete(id) : sel.ids.add(id);
+  refresh();
+}
+function pieceToolbar(m) {
+  const sel = state.pieceSel;
+  const picked = [...sel.ids].map(id => m.nodes.get(id)).filter(Boolean);
+  const arranged = isTank(m) && planFits(unitPlan(m.unit), kidsOf(m, null));
+  const clear = () => { sel.ids.clear(); sel.on = false; refresh(); };
+  const parts = [h('button', { class: 'btn sm' + (sel.on ? ' on' : ''), onclick: () => { sel.on = !sel.on; if (!sel.on) sel.ids.clear(); refresh(); } },
+    sel.on ? 'Done selecting' : 'Select racks')];
+  if (!picked.length) parts.push(h('span', { class: 'small faint' }, sel.on ? 'Click racks or loose spaces to select them' : 'Tip: shift-click racks to select several'));
+  else {
+    parts.push(h('span', { class: 'small muted' }, `${picked.length} selected`));
+    if (!arranged && (picked.length > 1 || picked[0].level === 'rack'))
+      parts.push(h('button', { class: 'btn sm primary', onclick: () => groupToSpace(m, picked) }, picked.length > 1 ? 'Make one loose space' : 'Make loose space'));
+    if (picked.every(p => p.level === 'space'))
+      parts.push(h('button', { class: 'btn sm', onclick: () => groupToRacks(m, picked) }, 'Make into racks'));
+    parts.push(h('button', { class: 'btn sm ghost', onclick: clear }, 'Clear'));
+    if (picked.length > 1 && !arranged) parts.push(h('span', { class: 'small faint' }, 'Drag any of them to move them together'));
+  }
+  return h('div', { class: 'toolbar sel-bar' }, parts);
+}
+async function groupToSpace(m, picked) {
+  const ordered = [...picked].sort((a, b) => kidsOf(m, a.parent_id).indexOf(a) - kidsOf(m, b.parent_id).indexOf(b));
+  const busy = ordered.filter(p => p.level === 'rack' && stats(m, p.id).used);
+  if (busy.length) { toast(`${busy.map(nodeLabel).join(', ')} still hold${busy.length === 1 ? 's' : ''} items — move or remove them first.`, true); return; }
+  const width = ordered.reduce((a, p) => a + (p.level === 'space' ? (p.span || 1) : 1), 0);
+  const ok = await confirmBox(`Make ${ordered.map(nodeLabel).join(', ')} into one loose space?`,
+    `They become a single loose space ${width} rack-width${width > 1 ? 's' : ''} wide, in the same place. Empty racks and their boxes are removed; items already in selected loose spaces move into the new one.`,
+    { okText: 'Make loose space' });
+  if (!ok) return;
+  const r = await attempt(() => api('POST', '/api/nodes/to-space', { ids: ordered.map(p => p.id) }), 'Done — one loose space');
+  if (r) { state.pieceSel.ids.clear(); state.pieceSel.on = false; refresh(); }
+}
+function groupToRacks(m, picked) {
+  if (picked.some(p => looseCount(m, p.id))) { toast('Empty the selected loose spaces first — their items need a new home.', true); return; }
+  const arranged = isTank(m) && planFits(unitPlan(m.unit), kidsOf(m, null));
+  const n = arranged ? picked.length : picked.reduce((a, p) => a + (p.span || 1), 0);
+  const d = guessLayout(m, picked[0].parent_id, 'rack');
+  if (!kidsOf(m, picked[0].parent_id).some(x => x.level === 'rack')) Object.assign(d, TYPES[m.unit.type].layout);
+  const err = h('p', { class: 'error' });
+  const form = h('form', { class: 'stack' },
+    h('p', { class: 'small muted' }, `Makes ${plural(n, 'rack')} (one per rack-width) in the same place. What goes in each rack:`),
+    h('div', { class: 'grid2' }, layoutFieldsBelow(m.unit.type, 'rack', d)), gridFields(d), err);
+  const go = async () => {
+    const v = formData(form);
+    const layout = { grid_rows: +v.grid_rows, grid_cols: +v.grid_cols, label_style: v.label_style };
+    for (const k of ['rows', 'boxes']) if (v[k] !== undefined) layout[k] = +v[k];
+    try {
+      await api('POST', '/api/nodes/to-racks', { ids: picked.map(p => p.id), layout });
+      close(); toast(`Made ${plural(n, 'rack')}`); state.pieceSel.ids.clear(); state.pieceSel.on = false; refresh();
+    } catch (x) { err.textContent = x.message; }
+  };
+  form.onsubmit = e => { e.preventDefault(); go(); };
+  const close = openModal({ title: `Make ${picked.length > 1 ? 'these loose spaces' : nodeLabel(picked[0])} into racks`, body: form,
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, `Make ${plural(n, 'rack')}`)] });
+}
 function legend(m) {
   const used = new Set(m.items.map(i => i.category_id));
   const cats = state.cats.filter(c => used.has(c.id));
@@ -753,7 +838,7 @@ function ownerBar(n) {
 }
 function rackTile(m, rack) {
   const s = stats(m, rack.id);
-  return h('div', { class: 'rack-tile' + (nodeMatches(m, rack.id) ? '' : ' dim'), 'data-href': nodeHref(m, rack.id), 'data-drag': rack.id,
+  return h('div', { class: 'rack-tile' + (nodeMatches(m, rack.id) ? '' : ' dim') + (state.pieceSel.ids.has(rack.id) ? ' picked' : ''), 'data-href': nodeHref(m, rack.id), 'data-drag': rack.id, 'data-piece': rack.id,
       title: `${nodeLabel(rack)} — ${s.used}/${s.cap} positions filled · drag to move` },
     h('div', { class: 'lbl' }, h('span', null, nodeLabel(rack))),
     h('div', { class: 'tile-sub' }, s.cap ? Math.round(100 * frac(s)) + '% full' : 'empty'),
@@ -765,7 +850,7 @@ function spaceTile(m, sp) {
   const span = sp.span || 1;
   const match = !state.highlight || ownerMatch(nodeOwner(m, sp.id)) || list.some(it => ownerMatch(itemOwner(m, it)));
   // flex-grow = span: a 2-wide space always takes the room of two racks, at any window width.
-  return h('div', { class: 'rack-tile space-tile' + (match ? '' : ' dim'), 'data-href': nodeHref(m, sp.id), 'data-drag': sp.id,
+  return h('div', { class: 'rack-tile space-tile' + (match ? '' : ' dim') + (state.pieceSel.ids.has(sp.id) ? ' picked' : ''), 'data-href': nodeHref(m, sp.id), 'data-drag': sp.id, 'data-piece': sp.id,
       style: { flex: `${span} 1 0` },
       title: `${nodeLabel(sp)} — ${plural(list.length, 'loose item')} · ${span} rack-width${span > 1 ? 's' : ''} · drag to move` },
     h('div', { class: 'lbl' }, h('span', null, nodeLabel(sp))),
@@ -824,11 +909,11 @@ function planSVG(m, sh, plan, pieces) {
     const name = nodeLabel(p), lbl = esc(name.length > 6 ? name.slice(0, 6) : name), long = name.length > 3 ? 'long' : '';
     if (p.level === 'space') {
       const cnt = looseCount(m, p.id);
-      return `<g class="rk space" data-href="${nodeHref(m, p.id)}" data-drag="${p.id}"><title>${esc(name)} (slot ${esc(sl.name)}) — ${cnt} loose item(s) · drag onto another slot to swap</title>
+      return `<g class="rk space${state.pieceSel.ids.has(p.id) ? ' picked' : ''}" data-href="${nodeHref(m, p.id)}" data-drag="${p.id}" data-piece="${p.id}"><title>${esc(name)} (slot ${esc(sl.name)}) — ${cnt} loose item(s) · drag onto another slot to swap</title>
         <rect x="${x0}" y="${y0}" width="${size}" height="${size}" rx="${rx}"/><text class="${long}" x="${x}" y="${y - 6}">${lbl}</text><text class="sub" x="${x}" y="${y + 9}">${cnt} item${cnt === 1 ? '' : 's'}</text></g>`;
     }
     const s = stats(m, p.id), own = p.owner_id || p.is_common;
-    return `<g class="rk${nodeMatches(m, p.id) ? '' : ' dim'}" data-href="${nodeHref(m, p.id)}" data-drag="${p.id}">
+    return `<g class="rk${nodeMatches(m, p.id) ? '' : ' dim'}${state.pieceSel.ids.has(p.id) ? ' picked' : ''}" data-href="${nodeHref(m, p.id)}" data-drag="${p.id}" data-piece="${p.id}">
       <title>${esc(name)}${name !== sl.name ? ` (in slot ${esc(sl.name)})` : ''} — ${s.used}/${s.cap} filled${own ? ' · ' + esc(ownerName(p.owner_id, p.is_common)) : ''} · drag onto another slot to swap</title>
       <rect x="${x0}" y="${y0}" width="${size}" height="${size}" rx="${rx}" style="fill:${fillColor(frac(s))}"/>
       ${own ? `<rect x="${x0 + 4}" y="${y0 + size - 7}" width="${size - 8}" height="3" rx="1.5" style="fill:${p.is_common ? 'var(--text-faint)' : userColor(p.owner_id)};stroke:none"/>` : ''}
@@ -869,7 +954,7 @@ function dewarView(m) {
           const cnt = looseCount(m, r.id);
           const match = !state.highlight || ownerMatch(nodeOwner(m, r.id)) || m.loose.some(it => it.node_id === r.id && ownerMatch(itemOwner(m, it)));
           const cx = pl.reduce((a, p) => a + p[0], 0) / pl.length, cy = pl.reduce((a, p) => a + p[1], 0) / pl.length;
-          return `<g class="rk space${match ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
+          return `<g class="rk space${match ? '' : ' dim'}${state.pieceSel.ids.has(r.id) ? ' picked' : ''}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}" data-piece="${r.id}">
             <title>${esc(nodeLabel(r))} — ${cnt} loose item(s) · ${pl.length} slot(s) · drag to move</title>
             ${pl.map(([px, py]) => `<rect x="${px - size / 2}" y="${py - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}"/>`).join('')}
             <text class="long" x="${cx}" y="${cy - (size > 34 ? 5 : 0)}">${esc(r.name && !/^Loose space \d+$/.test(r.name) ? r.name.slice(0, 7) : 'Loose')}</text>
@@ -878,7 +963,7 @@ function dewarView(m) {
         }
         const s = stats(m, r.id);
         const lbl = r.name ? r.name.replace(/^Rack /, '').slice(0, 6) : String(r.index + 1);
-        return `<g class="rk${nodeMatches(m, r.id) ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
+        return `<g class="rk${nodeMatches(m, r.id) ? '' : ' dim'}${state.pieceSel.ids.has(r.id) ? ' picked' : ''}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}" data-piece="${r.id}">
           <title>${esc(nodeLabel(r))} — ${s.used}/${s.cap} filled${own ? ' · ' + esc(ownerName(r.owner_id, r.is_common)) : ''} · drag to move</title>
           <rect x="${x - size / 2}" y="${y - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}" style="fill:${fillColor(frac(s))}"/>
           ${own ? `<rect x="${x - size / 2 + 4}" y="${y + size / 2 - 7}" width="${size - 8}" height="3" rx="1.5" style="fill:${r.is_common ? 'var(--text-faint)' : userColor(r.owner_id)};stroke:none"/>` : ''}
@@ -1039,22 +1124,41 @@ function unitSide(m) {
       h('dl', { class: 'kv' }, kv.map(([k, v]) => [h('dt', null, k), h('dd', null, v)]),
         h('dt', null, 'Assigned to'), h('dd', null, ownerChip(u.owner_id, u.is_common, { none: h('span', { class: 'faint' }, 'Unassigned') })),
         h('dt', null, 'Contents'), h('dd', null, `${boxed} / ${u.capacity} positions · ${u.loose} loose`)),
-      u.notes ? h('p', { class: 'small muted', style: { marginTop: '10px', whiteSpace: 'pre-wrap' } }, u.notes) : null),
+      u.notes ? h('p', { class: 'small muted', style: { marginTop: '10px', whiteSpace: 'pre-wrap' } }, u.notes) : null,
+      h('div', { class: 'row', style: { marginTop: '12px' } },
+        h('a', { class: 'btn sm ghost', href: `#/search?unit_id=${u.id}` }, 'List all items'),
+        h('a', { class: 'btn sm ghost', href: `#/activity?unit_id=${u.id}` }, 'History'))),
     looseCard(m, null),
-    h('div', { class: 'card' },
-      h('div', { class: 'card-head' }, h('h3', null, 'Layout')),
-      h('p', { class: 'small muted' }, isTank(m)
-        ? `${plural(kidsOf(m, null).filter(x => x.level === 'rack').length, 'rack')} — click a rack in the diagram to rename it, assign it to someone, or change its boxes.`
-        : `${plural(kidsOf(m, null).length, 'shelf')} — click a shelf or rack in the diagram to rename it, assign it to someone, or change what's inside.`.replace('shelfs', 'shelves')),
-      h('div', { class: 'row', style: { marginTop: '10px' } },
-        h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, null) }, isTank(m) ? '+ Add rack' : '+ Add shelf'),
-        isTank(m) ? h('button', { class: 'btn sm', onclick: () => addSpaceDialog(m, null) }, '+ Add loose space') : null,
-        h('a', { class: 'btn sm', href: `#/search?unit_id=${u.id}` }, 'List all items'),
-        h('a', { class: 'btn sm', href: `#/activity?unit_id=${u.id}` }, 'History'),
-        h('button', { class: 'btn sm', onclick: () => savePreset(m) }, 'Save as preset'))),
-    state.me.role === 'admin' ? h('div', { class: 'card' },
-      h('button', { class: 'btn danger sm', onclick: () => deleteUnit(m) }, 'Delete this storage unit…')) : null,
   ];
+}
+/** Layout controls, shown on Details › Edit: what's in the unit, and adding to it. */
+function layoutEditCard(m) {
+  const u = m.unit;
+  const describe = holderId => {
+    const kids = kidsOf(m, holderId);
+    const racks = kids.filter(x => x.level === 'rack'), spaces = kids.filter(x => x.level === 'space');
+    const parts = [];
+    if (racks.length) {
+      const inner = childLevel(u.type, 'rack');
+      const per = kidsOf(m, racks[0].id).length;
+      parts.push(`${plural(racks.length, 'rack')}` + (per ? ` (${per} ${per === 1 ? inner : levelPlural(inner)} each)` : ''));
+    }
+    if (spaces.length) parts.push(spaces.map(sp => `${nodeLabel(sp)}${(sp.span || 1) > 1 ? ` (${sp.span} wide)` : ''}`).join(', '));
+    return parts.join(' · ') || 'empty';
+  };
+  const rowsList = isTank(m)
+    ? [h('li', null, h('a', { href: `#/unit/${u.id}` }, 'Tank'), ' — ', describe(null))]
+    : kidsOf(m, null).map(sh => h('li', null, h('a', { href: nodeHref(m, sh.id) }, nodeLabel(sh)), ' — ', describe(sh.id)));
+  return h('div', { class: 'card stack' },
+    h('div', { class: 'card-head' }, h('h2', null, 'Layout')),
+    rowsList.length ? h('ul', { class: 'layout-list' }, rowsList) : h('p', { class: 'small faint' }, 'Nothing set up yet.'),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn sm', type: 'button', onclick: () => addChildrenDialog(m, null) }, isTank(m) ? '+ Add rack' : '+ Add shelf'),
+      isTank(m) ? h('button', { class: 'btn sm', type: 'button', onclick: () => addSpaceDialog(m, null) }, '+ Add loose space') : null,
+      h('button', { class: 'btn sm', type: 'button', onclick: () => savePreset(m) }, 'Save as preset')),
+    h('p', { class: 'small muted' }, isTank(m)
+      ? 'To rename, reassign, re-fill or convert a rack, click it in the tank diagram. Shift-click (or “Select racks”) to pick several and turn them into one loose space, or drag them together.'
+      : 'To rename, reassign or convert a shelf or rack, click it in the freezer diagram. Shift-click (or “Select racks”) to pick several racks and turn them into one loose space, or drag them together.'));
 }
 function looseCard(m, shelf) {
   const list = m.loose.filter(i => shelf ? i.node_id === shelf.id : true);
@@ -1349,7 +1453,9 @@ async function deleteUnit(m) {
 // ------------------------------------------------------------------------ //
 async function viewUnitForm(uid) {
   const editing = !!uid;
-  const u = editing ? (await api('GET', `/api/units/${uid}`)).unit : { type: '-80' };
+  const unitData = editing ? await api('GET', `/api/units/${uid}`) : null;
+  const u = editing ? unitData.unit : { type: '-80' };
+  const em = editing ? buildModel(unitData) : null;
   const presets = editing ? [] : await api('GET', '/api/presets').catch(() => []);
   let type = u.type;
   let layoutTouched = false;
@@ -1394,7 +1500,7 @@ async function viewUnitForm(uid) {
       sizeList, h('datalist', { id: 'loc-list' })),
     editing ? h('div', { class: 'stack' },
       planToggle ? h('label', { class: 'row small' }, planToggle, `Use the tank's compartment arrangement (${plan.slots.map(x => x.name).filter(Boolean).slice(0, 1)}–${plan.slots.map(x => x.name).filter(Boolean).slice(-1)} slots). Unticking switches to a plain round layout and can't be undone here.`) : null,
-      h('p', { class: 'small muted' }, 'To change shelves, racks, rows or boxes, open the unit and use the layout panel next to the diagram.')) : layoutBox,
+      null) : layoutBox,
     err,
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', type: 'submit' }, editing ? 'Save changes' : 'Create storage unit'),
@@ -1504,7 +1610,11 @@ async function viewUnitForm(uid) {
   return h('div', null,
     h('div', { class: 'crumbs' }, h('a', { href: '#/' }, 'Storage'), '›', editing ? [h('a', { href: `#/unit/${uid}` }, u.name), '›'] : null, h('span', { class: 'cur' }, editing ? 'Edit' : 'New')),
     h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', null, editing ? `Edit ${u.name}` : 'Add cold storage'))),
-    editing ? h('div', { style: { maxWidth: '760px' } }, form) : h('div', { class: 'form-layout' }, form, h('div', { class: 'preview' }, preview)));
+    editing ? h('div', { class: 'stack', style: { maxWidth: '760px' } }, form, layoutEditCard(em),
+      state.me.role === 'admin' ? h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Delete')),
+        h('p', { class: 'small muted', style: { marginBottom: '10px' } }, 'Removes the unit and its layout. Items still inside are logged as removed, so their history is kept.'),
+        h('button', { class: 'btn danger sm', type: 'button', onclick: () => deleteUnit(em) }, 'Delete this storage unit…')) : null)
+      : h('div', { class: 'form-layout' }, form, h('div', { class: 'preview' }, preview)));
 }
 
 // ------------------------------------------------------------------------ //

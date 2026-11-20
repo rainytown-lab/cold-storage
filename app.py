@@ -44,7 +44,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 6
+API_VERSION = 7
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -864,6 +864,146 @@ def convert_node(ctx):
         log(ctx, "node.convert", f"Replaced {old_label} with a rack", unit_id=n["unit_id"])
     conn.commit()
     return {"ok": True}
+
+
+def _group(conn, ids, levels):
+    """Load nodes for a group action: same unit, same holder, allowed levels. Returns
+    (nodes in sibling order, the holder's full sibling id list)."""
+    ids = [as_int(i, "id") for i in (ids or [])]
+    require(ids, "Nothing selected")
+    q = ",".join("?" * len(ids))
+    nodes = rows(conn.execute(f"SELECT * FROM nodes WHERE id IN ({q})", ids))
+    require(len(nodes) == len(set(ids)), "Some of those no longer exist — reload the page")
+    require(all(n["level"] in levels for n in nodes), "Select only racks and loose spaces")
+    require(len({(n["unit_id"], n["parent_id"]) for n in nodes}) == 1, "Select pieces on the same shelf")
+    unit_id, holder = nodes[0]["unit_id"], nodes[0]["parent_id"]
+    sibs = [r[0] for r in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS ? ORDER BY position, id",
+                                       (unit_id, holder))]
+    nodes.sort(key=lambda n: sibs.index(n["id"]))
+    return nodes, sibs
+
+
+@route("POST", "/api/nodes/to-space")
+def group_to_space(ctx):
+    """Turn several side-by-side racks / loose spaces into ONE loose space as wide as all of them.
+    Racks must be empty; items in selected loose spaces move into the new space."""
+    conn = ctx["conn"]
+    nodes, sibs = _group(conn, ctx["body"].get("ids"), SHELF_CHILDREN)
+    idx = [sibs.index(n["id"]) for n in nodes]
+    require(idx == list(range(idx[0], idx[0] + len(idx))), "The selected pieces must be side by side")
+    for n in nodes:
+        if n["level"] == "rack":
+            cnt = _stored_under(conn, n["id"])
+            tree0 = Tree(conn, n["unit_id"])
+            require(cnt == 0, f"{tree0.label(tree0.nodes[n['id']])} still holds {cnt} item(s) — move or remove them first.", 409)
+    unit_id, holder = nodes[0]["unit_id"], nodes[0]["parent_id"]
+    require(not (holder is None and unit_plan(conn, unit_id)),
+            "Racks in this tank sit in fixed slots — convert them one at a time from each rack's page")
+    tree = Tree(conn, unit_id)
+    labels = [tree.label(tree.nodes[n["id"]]) for n in nodes]
+    _freeze_labels(conn, tree, {holder})
+    keep = nodes[0]
+    width = sum((n["span"] or 1) if n["level"] == "space" else 1 for n in nodes)
+    for n in nodes[1:]:
+        conn.execute("UPDATE items SET node_id = ? WHERE node_id = ?", (keep["id"], n["id"]))
+        conn.execute("DELETE FROM nodes WHERE id = ?", (n["id"],))
+    conn.execute("DELETE FROM nodes WHERE parent_id = ?", (keep["id"],))      # an empty rack's rows/boxes
+    name = keep["name"] if keep["level"] == "space" and keep["name"] else _free_name(conn, unit_id, holder, "Loose space", keep["id"])
+    conn.execute("UPDATE nodes SET level = 'space', span = ?, name = ? WHERE id = ?", (min(width, MAX_SPAN), name, keep["id"]))
+    log(ctx, "node.convert", f"Replaced {', '.join(labels)} with one loose space ({width} rack-widths)", unit_id=unit_id)
+    conn.commit()
+    return {"ok": True, "id": keep["id"]}
+
+
+@route("POST", "/api/nodes/to-racks")
+def group_to_racks(ctx):
+    """Turn loose spaces back into racks: each space becomes one rack per rack-width it was."""
+    conn, b = ctx["conn"], ctx["body"]
+    nodes, sibs = _group(conn, b.get("ids"), ("space",))
+    unit_id, holder = nodes[0]["unit_id"], nodes[0]["parent_id"]
+    for n in nodes:
+        require(_stored_under(conn, n["id"]) == 0, "Empty the loose spaces first — their items need a new home", 409)
+    chain = unit_chain(conn, unit_id)
+    inner = next_level("rack", chain)
+    layout = clean_layout(b.get("layout") or {}, inner, chain)
+    plan = unit_plan(conn, unit_id) if holder is None else None
+    tree = Tree(conn, unit_id)
+    _freeze_labels(conn, tree, {holder})
+    order = list(sibs)
+    made = 0
+    for n in nodes:
+        count = 1 if plan else (n["span"] or 1)
+        conn.execute("UPDATE nodes SET level = 'rack', span = 1, name = ? WHERE id = ?",
+                     (_free_name(conn, unit_id, holder, "Rack", n["id"]), n["id"]))
+        build_nodes(conn, unit_id, n["id"], inner, layout[LAYOUT_KEYS[inner]], layout, 0, chain)
+        extra = []
+        for _ in range(count - 1):
+            nid = build_nodes(conn, unit_id, holder, "rack", 1, layout, 0, chain)[0]
+            conn.execute("UPDATE nodes SET name = ? WHERE id = ?", (_free_name(conn, unit_id, holder, "Rack", nid), nid))
+            extra.append(nid)
+        at = order.index(n["id"]) + 1
+        order[at:at] = extra
+        made += count
+    if not plan:   # arranged tanks keep slot positions; elsewhere renumber so new racks sit in place
+        for i, nid in enumerate(order):
+            conn.execute("UPDATE nodes SET position = ? WHERE id = ?", (i, nid))
+    log(ctx, "node.convert", f"Replaced {len(nodes)} loose space(s) with {made} rack(s)", unit_id=unit_id)
+    conn.commit()
+    return {"ok": True, "racks": made}
+
+
+@route("POST", "/api/nodes/place-many")
+def place_many(ctx):
+    """Move a group of racks/loose spaces (or boxes) together: {ids, parent_id, before_id}.
+    They keep their order and land side by side."""
+    conn, b = ctx["conn"], ctx["body"]
+    nodes, _ = _group(conn, b.get("ids"), SHELF_CHILDREN + ("box",))
+    require(len({n["level"] == "box" for n in nodes}) == 1, "Move boxes and racks separately")
+    unit_id, old_holder = nodes[0]["unit_id"], nodes[0]["parent_id"]
+    chain = unit_chain(conn, unit_id)
+    if nodes[0]["level"] == "box":
+        holder_level = chain[chain.index("box") - 1]
+    else:
+        holder_level = "shelf" if "shelf" in chain else None
+        require(not (holder_level is None and unit_plan(conn, unit_id)),
+                "Racks in this tank sit in fixed slots — swap them one at a time")
+    if holder_level:
+        target = as_int(b.get("parent_id"), holder_level.capitalize(), allow_none=False)
+        require(conn.execute("SELECT 1 FROM nodes WHERE id = ? AND unit_id = ? AND level = ?",
+                             (target, unit_id, holder_level)).fetchone(), f"Drop them on a {holder_level} of this unit")
+    else:
+        target = None
+    before = as_int(b.get("before_id"), "before")
+    ids = [n["id"] for n in nodes]
+    require(before not in ids, "Drop the group outside itself")
+    tree = Tree(conn, unit_id)
+    _freeze_labels(conn, tree, {old_holder, target})
+    tgt = [r[0] for r in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS ? ORDER BY position, id",
+                                      (unit_id, target)) if r[0] not in ids]
+    at = tgt.index(before) if before is not None else len(tgt)
+    require(before is None or before in tgt, "Drop target isn't there")
+    tgt[at:at] = ids
+    renamed = []
+    for n in nodes:
+        conn.execute("UPDATE nodes SET parent_id = ? WHERE id = ?", (target, n["id"]))
+        if target != old_holder:
+            label = tree.label(tree.nodes[n["id"]])
+            if conn.execute("SELECT 1 FROM nodes WHERE unit_id = ? AND parent_id IS ? AND id != ? AND name = ?",
+                            (unit_id, target, n["id"], label)).fetchone():
+                new = _free_name(conn, unit_id, target, label, n["id"])
+                conn.execute("UPDATE nodes SET name = ? WHERE id = ?", (new, n["id"]))
+                renamed.append(f"{label} → {new}")
+    for i, nid in enumerate(tgt):
+        conn.execute("UPDATE nodes SET position = ? WHERE id = ?", (i, nid))
+    if target != old_holder:   # close the gap they left
+        rest = [r[0] for r in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS ? ORDER BY position, id",
+                                           (unit_id, old_holder))]
+        for i, nid in enumerate(rest):
+            conn.execute("UPDATE nodes SET position = ? WHERE id = ?", (i, nid))
+    where = tree.label(tree.nodes[target]) if target else tree.units[unit_id]["name"]
+    log(ctx, "node.move", f"Moved {', '.join(tree.label(tree.nodes[i]) for i in ids)} together to {where}", unit_id=unit_id)
+    conn.commit()
+    return {"ok": True, "renamed": renamed}
 
 
 @route("POST", "/api/nodes/<id>/merge")
