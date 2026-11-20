@@ -61,6 +61,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL
 );
 
+-- Kinds of containers that can sit in a loose space (Box, Freezing cylinder, …); editable in Settings.
+CREATE TABLE IF NOT EXISTS container_types (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name  TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    sort  INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS categories (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
     name  TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -107,7 +114,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     unit_id     INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
     parent_id   INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
-    level       TEXT NOT NULL,          -- shelf | rack | row | box | space (loose-item area on a shelf)
+    level       TEXT NOT NULL,          -- shelf | rack | row | box | space (loose-item area) | bin (container in a space)
+    kind        TEXT,                   -- bins: container type ("Freezing cylinder")
     position    INTEGER NOT NULL DEFAULT 0,
     span        INTEGER NOT NULL DEFAULT 1,  -- spaces: how many rack-widths it takes up
     name        TEXT,                   -- NULL = default label ("Rack 3")
@@ -167,6 +175,8 @@ CREATE TABLE IF NOT EXISTS activity (
 CREATE INDEX IF NOT EXISTS idx_activity_item ON activity(item_id);
 CREATE INDEX IF NOT EXISTS idx_activity_at   ON activity(at);
 """
+
+DEFAULT_CONTAINER_TYPES = ["Box", "Freezing cylinder", "Bag", "Canister", "Tray"]
 
 DEFAULT_CATEGORIES = [
     ("Cells", "#e4572e"),
@@ -259,13 +269,13 @@ def read_conn():
 
 
 def _home_loose_items(conn):
-    """Every loose item must sit in a loose space (a drawn section of the unit), like a tube sits in a
-    box. Items left directly in a unit or on a shelf by older versions get a new loose space beside
+    """Every loose item must sit in a loose space (a drawn section of the unit) or a container in one,
+    like a tube sits in a box. Items left directly in a unit or on a shelf by older versions get a new loose space beside
     the racks: on their shelf, on the first shelf (freezers), or in the tank. Safe to run every start."""
     strays = conn.execute("""
         SELECT i.id, i.unit_id, i.node_id, u.type FROM items i JOIN units u ON u.id = i.unit_id
         LEFT JOIN nodes n ON n.id = i.node_id
-        WHERE i.status = 'stored' AND i.pos_row IS NULL AND (i.node_id IS NULL OR n.level != 'space')""").fetchall()
+        WHERE i.status = 'stored' AND i.pos_row IS NULL AND (i.node_id IS NULL OR n.level NOT IN ('space', 'bin'))""").fetchall()
     made = {}
     for iid, uid, node_id, utype in strays:
         holder = node_id
@@ -305,6 +315,14 @@ def init_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_unit ON activity(unit_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_batch ON activity(batch)")
     ucols = {r[1] for r in conn.execute("PRAGMA table_info(units)")}
+    ncols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
+    if "kind" not in ncols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN kind TEXT")
+    if conn.execute("SELECT COUNT(*) FROM container_types").fetchone()[0] == 0 and \
+            not conn.execute("SELECT 1 FROM settings WHERE key = 'container_types_seeded'").fetchone():
+        conn.executemany("INSERT INTO container_types (name, sort) VALUES (?, ?)",
+                         [(n, i) for i, n in enumerate(DEFAULT_CONTAINER_TYPES)])
+        conn.execute("INSERT INTO settings (key, value) VALUES ('container_types_seeded', '1')")
     for col in ("device_name", "plan"):
         if col not in ucols:
             conn.execute(f"ALTER TABLE units ADD COLUMN {col} TEXT")

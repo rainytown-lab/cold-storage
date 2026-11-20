@@ -40,12 +40,12 @@ CHAINS = {"ln2": ("rack", "box")}
 
 def chain_for(unit_type):
     return CHAINS.get(unit_type, LEVELS)
-LEVEL_LABEL = {"shelf": "Shelf", "rack": "Rack", "row": "Row", "box": "Box", "space": "Loose space"}
+LEVEL_LABEL = {"shelf": "Shelf", "rack": "Rack", "row": "Row", "box": "Box", "space": "Loose space", "bin": "Container"}
 SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 11
+API_VERSION = 12
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -198,14 +198,19 @@ class Tree:
         groups = defaultdict(list)
         for n in nodes:
             # Number per level, so "Rack 3" ignores loose spaces sitting between racks.
-            groups[(n["unit_id"], n["parent_id"], n["level"])].append(n)
+            # (containers are numbered per type: "Box 1", "Freezing cylinder 1")
+            groups[(n["unit_id"], n["parent_id"], n["level"], n.get("kind") if n["level"] == "bin" else None)].append(n)
         for g in groups.values():
             g.sort(key=lambda n: (n["position"], n["id"]))
             for i, n in enumerate(g):
                 n["index"] = i
 
     def label(self, n):
-        return n["name"] or f"{LEVEL_LABEL[n['level']]} {n['index'] + 1}"
+        if n["name"]:
+            return n["name"]
+        if n["level"] == "bin":   # containers are named by type: "Freezing cylinder 2"
+            return f"{n.get('kind') or 'Container'} {n['index'] + 1}"
+        return f"{LEVEL_LABEL[n['level']]} {n['index'] + 1}"
 
     def chain(self, node_id):
         out = []
@@ -236,7 +241,7 @@ class Tree:
         txt = " › ".join(p["label"] for p in parts)
         if pos:
             txt += f" › {pos}"
-        elif item.get("pos_row") is None and chain and chain[-1]["level"] == "space":
+        elif item.get("pos_row") is None and chain and chain[-1]["level"] in ("space", "bin"):
             txt += f" ({item['loose_where']})" if item.get("loose_where") else ""
         elif item.get("pos_row") is None:
             txt += " › loose" + (f" ({item['loose_where']})" if item.get("loose_where") else "")
@@ -522,6 +527,54 @@ def _color(b):
     return c
 
 
+@route("GET", "/api/container-types")
+def list_container_types(ctx):
+    return rows(ctx["conn"].execute("""
+        SELECT t.*, (SELECT COUNT(*) FROM nodes n WHERE n.level = 'bin' AND n.kind = t.name) AS used
+        FROM container_types t ORDER BY sort, name COLLATE NOCASE"""))
+
+
+@route("POST", "/api/container-types")
+def create_container_type(ctx):
+    conn = ctx["conn"]
+    name = text(ctx["body"], "name", 60)
+    require(name, "Name is required")
+    require(not conn.execute("SELECT 1 FROM container_types WHERE name = ?", (name,)).fetchone(), "That type already exists")
+    sort = conn.execute("SELECT COALESCE(MAX(sort), 0) + 1 FROM container_types").fetchone()[0]
+    cur = conn.execute("INSERT INTO container_types (name, sort) VALUES (?, ?)", (name, sort))
+    conn.commit()
+    return {"id": cur.lastrowid}
+
+
+@route("PUT", "/api/container-types/<id>")
+def rename_container_type(ctx):
+    conn = ctx["conn"]
+    tid = as_int(ctx["params"]["id"], "id")
+    old = one(conn.execute("SELECT * FROM container_types WHERE id = ?", (tid,)))
+    require(old, "Not found", 404)
+    name = text(ctx["body"], "name", 60)
+    require(name, "Name is required")
+    dup = conn.execute("SELECT 1 FROM container_types WHERE name = ? AND id != ?", (name, tid)).fetchone()
+    require(not dup, "That type already exists")
+    conn.execute("UPDATE container_types SET name = ? WHERE id = ?", (name, tid))
+    conn.execute("UPDATE nodes SET kind = ? WHERE level = 'bin' AND kind = ?", (name, old["name"]))   # containers follow
+    conn.commit()
+    return {"ok": True}
+
+
+@route("DELETE", "/api/container-types/<id>")
+def delete_container_type(ctx):
+    conn = ctx["conn"]
+    tid = as_int(ctx["params"]["id"], "id")
+    t = one(conn.execute("SELECT * FROM container_types WHERE id = ?", (tid,)))
+    require(t, "Not found", 404)
+    n = conn.execute("SELECT COUNT(*) FROM nodes WHERE level = 'bin' AND kind = ?", (t["name"],)).fetchone()[0]
+    require(n == 0, f"{n} container(s) are this type — change them first.", 409)
+    conn.execute("DELETE FROM container_types WHERE id = ?", (tid,))
+    conn.commit()
+    return {"ok": True}
+
+
 @route("GET", "/api/categories")
 def list_categories(ctx):
     return rows(ctx["conn"].execute("""
@@ -663,7 +716,7 @@ def get_unit(ctx):
     unit = one(conn.execute(UNIT_LIST_SQL + " WHERE u.id = ?", (uid,)))
     require(unit, "Storage unit not found", 404)
     nodes = rows(conn.execute(
-        "SELECT id, parent_id, level, position, span, name, owner_id, is_common, grid_rows, grid_cols,"
+        "SELECT id, parent_id, level, position, span, kind, name, owner_id, is_common, grid_rows, grid_cols,"
         " label_style, notes FROM nodes WHERE unit_id = ? ORDER BY position, id", (uid,)))
     items = rows(conn.execute("""
         SELECT id, name, category_id, node_id, pos_row, pos_col, owner_id, is_common, quantity,
@@ -753,9 +806,19 @@ def add_nodes(ctx):
         parent = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ?", (parent_id, uid)))
         require(parent, "Parent not found", 404)
         level = next_level(parent["level"], chain)
-        require(level, "That can't contain other containers")
+        # Containers and loose spaces have their own rules below.
+        require(level or b.get("level") in ("bin", "space"), "That can't contain other containers")
     else:
         level = chain[0]
+    if b.get("level") == "bin":
+        require(parent and parent["level"] == "space", "Containers go in a loose space")
+        kind = text(b, "kind", 60)
+        require(kind, "Pick a container type")
+        cur = conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, kind, name) VALUES (?,?,?,?,?,?)",
+                           (uid, parent_id, "bin", _next_pos(conn, uid, parent_id), kind, text(b, "name", 80)))
+        log(ctx, "node.add", f"Added a {kind.lower()}" + (f" “{text(b, 'name', 80)}”" if text(b, "name", 80) else ""), unit_id=uid)
+        conn.commit()
+        return {"ids": [cur.lastrowid]}
     if b.get("level") == "space":
         # Loose spaces take the place of whatever normally sits there: racks on a shelf (or in a
         # tank), rows in a rack, boxes in a row (or in a tank rack).
@@ -808,6 +871,9 @@ def update_node(ctx):
         sets["notes"] = text(b, "notes", 2000)
     if "owner_id" in b or "is_common" in b:
         sets["owner_id"], sets["is_common"] = owner_fields(conn, b)
+    if n["level"] == "bin" and "kind" in b:
+        sets["kind"] = text(b, "kind", 60)
+        require(sets["kind"], "Pick a container type")
     if n["level"] == "space" and "span" in b:
         sets["span"] = as_int(b["span"], "Width", 1, MAX_SPAN, False)
     if n["level"] == "box":
@@ -890,6 +956,7 @@ def convert_node(ctx):
         conn.execute("UPDATE nodes SET level='space', span=1, name=? WHERE id=?", (name, nid))
         log(ctx, "node.convert", f"Replaced {old_label} with a loose space", unit_id=n["unit_id"])
     else:
+        conn.execute("DELETE FROM nodes WHERE parent_id = ?", (nid,))      # its (empty) containers
         inner = next_level(kind, chain)
         layout = clean_layout(b.get("layout") or {}, inner, chain) if inner else clean_layout(b.get("layout") or {}, "box", chain)
         name = n["name"] if n["name"] and not re.fullmatch(r"Loose space \d+", n["name"]) else None
@@ -961,8 +1028,11 @@ def group_to_space(ctx):
     width = sum((n["span"] or 1) if n["level"] == "space" else 1 for n in nodes)
     for n in nodes[1:]:
         conn.execute("UPDATE items SET node_id = ? WHERE node_id = ?", (keep["id"], n["id"]))
+        if n["level"] == "space":
+            conn.execute("UPDATE nodes SET parent_id = ? WHERE parent_id = ?", (keep["id"], n["id"]))
         conn.execute("DELETE FROM nodes WHERE id = ?", (n["id"],))
-    conn.execute("DELETE FROM nodes WHERE parent_id = ?", (keep["id"],))      # an empty rack's rows/boxes
+    if keep["level"] == "rack":
+        conn.execute("DELETE FROM nodes WHERE parent_id = ?", (keep["id"],))  # an empty rack's rows/boxes
     name = keep["name"] if keep["level"] == "space" and keep["name"] else _free_name(conn, unit_id, holder, "Loose space", keep["id"])
     conn.execute("UPDATE nodes SET level = 'space', span = ?, name = ? WHERE id = ?", (min(width, MAX_SPAN), name, keep["id"]))
     log(ctx, "node.convert", f"Replaced {', '.join(labels)} with one loose space ({width} rack-widths)", unit_id=unit_id)
@@ -1097,6 +1167,7 @@ def merge_spaces(ctx):
     _freeze_labels(conn, tree, {n["parent_id"]})          # neighbours keep their names
     keep_label, gone_label = tree.label(tree.nodes[keep["id"]]), tree.label(tree.nodes[gone["id"]])
     moved = conn.execute("UPDATE items SET node_id = ? WHERE node_id = ?", (keep["id"], gone["id"])).rowcount
+    conn.execute("UPDATE nodes SET parent_id = ? WHERE parent_id = ?", (keep["id"], gone["id"]))   # its containers
     notes = "\n".join(x for x in (keep["notes"], gone["notes"]) if x) or None
     conn.execute("UPDATE nodes SET span = ?, notes = ?, name = ? WHERE id = ?",
                  (min((keep["span"] or 1) + (gone["span"] or 1), MAX_SPAN), notes, keep_label, keep["id"]))
@@ -1114,7 +1185,7 @@ def place_node(ctx):
     conn, b = ctx["conn"], ctx["body"]
     nid = as_int(ctx["params"]["id"], "id")
     n = one(conn.execute("SELECT * FROM nodes WHERE id = ?", (nid,)))
-    require(n and n["level"] in ("rack", "row", "box", "space"), "Only racks, rows, boxes and loose spaces can be moved")
+    require(n and n["level"] in ("rack", "row", "box", "space", "bin"), "Only racks, rows, boxes, loose spaces and containers can be moved")
     chain = unit_chain(conn, n["unit_id"])
     # A piece moves between holders of the same kind it's in now: racks/spaces between shelves (or
     # around a tank), rows/spaces between racks, boxes/spaces between rows (tank: between racks).
@@ -1279,7 +1350,7 @@ def _check_place(conn, unit_id, node_id, pos, exclude_item=None):
             (node_id, r, c, exclude_item)).fetchone()
         require(not taken, f"That position already holds “{taken[0] if taken else ''}”", 409)
     else:
-        require(node["level"] == "space", "Loose items go in a loose space — pick one, or add a loose space first")
+        require(node["level"] in ("space", "bin"), "Loose items go in a loose space (or a container in one) — pick one, or add a loose space first")
         require(pos is None, "Positions only exist inside boxes")
     return node
 

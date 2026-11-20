@@ -30,6 +30,11 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   CryoExtra CE8120 LN₂ tank: four compartments (A–D) of three racks each, drawn in
   their real places. Any unit can be saved as a new preset ("Save as preset" on
   its page). Presets are managed under Settings.
+- **Containers in loose spaces**: a loose space can hold containers, such as a Box,
+  a Freezing cylinder or a Bag, and loose items go into those containers (or
+  straight into the space). Each container has its own page (name, type, owner,
+  items, move to another loose space). Container types are an editable list under
+  Settings › Container types; renaming a type renames it on every container.
 - **Arranged tanks**: in a tank whose racks sit in fixed compartment slots,
   dragging a rack onto another rack swaps them, and dragging it onto an empty slot
   moves it there. The rack page has a matching Slot picker.
