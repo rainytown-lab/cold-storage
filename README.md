@@ -24,7 +24,8 @@ admin adds everyone else under **Settings › People**.
   you create a unit, and a live preview shows the result. After that you can add,
   delete, rename or reassign any shelf, rack, row or box, and resize a box
   (e.g. 9×9, 10×10, 8×12, or a custom size; positions labelled A1… or 1…n).
-- **Interactive diagram**: freezers and fridges show a front view, LN₂ tanks a top
+- **Interactive diagram**: freezers and fridges show a tall, freezer-shaped front
+  view (racks, rows and drawers are drawn portrait too); LN₂ tanks a top
   view. You click into a rack, then a row, then a box, then a position. Each level
   shows only a summary of the level below (name and how full it is). The tubes,
   coloured by category, appear only once you open a box. Pieces on a shelf, and
@@ -47,8 +48,8 @@ admin adds everyone else under **Settings › People**.
   another shelf. This works in the freezer front view and the LN₂ top view; on a
   phone, long-press first. A rack or space keeps its name when it moves. The side
   panel also has "Move left / right" and "Shelf" controls.
-- **You are here**: inside a shelf, rack, row or box, a mini map in the header
-  highlights where you are in the unit (and in the rack). Click it to jump.
+- **You are here**: inside a shelf, rack, row or box, a small freezer-shaped map
+  in the header highlights your shelf and rack. Click it to jump.
 - **Move**: open an item, click Move, then click an empty position in any box in
   any unit, or put it somewhere as a loose item.
 - **Remove / put back**: removal records the date, the person and a reason. Removed

@@ -427,3 +427,32 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .rack-row.drop-into { outline: 2px dashed var(--primary); outline-offset: 2px; }
 .outdated { position: sticky; top: 0; z-index: 30; background: var(--danger); color: #fff; padding: 10px 24px; font-size: 14px; }
 .outdated code { background: rgba(0,0,0,.25); padding: 1px 6px; border-radius: 5px; }
+
+/* ---------- Portrait (freezer-shaped) diagrams ----------
+   Cabinet, shelf, rack and row views are drawn tall like the real thing. The frame keeps a
+   portrait aspect ratio and its shelves/rows share the height; with many shelves it simply
+   grows taller rather than turning landscape. */
+.cabinet { max-width: 440px; aspect-ratio: 3 / 5; display: flex; flex-direction: column; }
+.cabinet-inner { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.cabinet-inner > .shelf { flex: 1 1 0; display: flex; flex-direction: column; min-height: 58px; }
+.cabinet-inner > .shelf > .racks { flex: 1; align-items: stretch; }
+.cabinet-inner > .shelf > .racks > .rack-tile { min-height: 0; }
+.racks.big > .rack-tile { min-height: 0; }
+.rack-frame { max-width: 380px; aspect-ratio: 3 / 5; display: flex; flex-direction: column; gap: 6px; }
+.rack-frame > .rack-row { flex: 1 1 0; min-height: 40px; margin: 0; }
+.rack-frame > .rack-row + .rack-row { margin-top: 0; }
+.rack-row .row-boxes { align-items: stretch; }
+.rack-row .box-tile { min-height: 0; }
+.row-frame { max-width: 300px; }
+.row-frame > .rack-row { padding: 8px; }
+.row-boxes.col { flex-direction: column; gap: 8px; }
+.row-boxes.col > .box-tile { flex: 1 1 0; min-height: 44px; max-width: none; }
+.box-tile.drop-before-v { box-shadow: 0 -4px 0 0 var(--primary); }
+.box-tile.drop-after-v { box-shadow: 0 4px 0 0 var(--primary); }
+
+/* Locator: one small portrait freezer */
+.loc-map.loc-cab { width: 58px; aspect-ratio: 3 / 5; }
+.loc-cab .loc-shelf { flex: 1 1 0; min-height: 3px; align-items: stretch; }
+.loc-cab .loc-cell { height: auto; }
+.loc-dewar { width: 76px; height: 76px; }
+.page-head:has(.locator) { align-items: center; }

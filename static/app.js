@@ -268,7 +268,7 @@ document.addEventListener('click', e => {
 // Mouse: drag after moving 6px.  Touch/pen: long-press 350 ms, then drag.
 // ------------------------------------------------------------------------ //
 const dnd = { st: null, suppressClickUntil: 0 };
-function dndClear() { for (const el of document.querySelectorAll('.drop-before, .drop-after, .drop-into')) el.classList.remove('drop-before', 'drop-after', 'drop-into'); }
+function dndClear() { for (const el of document.querySelectorAll('.drop-before, .drop-after, .drop-into')) el.classList.remove('drop-before', 'drop-after', 'drop-before-v', 'drop-after-v', 'drop-into'); }
 function dndStart() {
   const st = dnd.st;
   st.active = true;
@@ -290,11 +290,12 @@ function dndTarget(x, y) {
   const tile = el.closest('[data-drag]');
   if (tile && tile !== st.src && zone.contains(tile)) {
     const r = tile.getBoundingClientRect();
-    const after = x > r.left + r.width / 2;
+    const vertical = getComputedStyle(tile.parentElement).flexDirection === 'column';
+    const after = vertical ? y > r.top + r.height / 2 : x > r.left + r.width / 2;
     const order = [...zone.querySelectorAll('[data-drag]')].filter(t => t !== st.src);
     const idx = order.indexOf(tile);
     const before = after ? (order[idx + 1] ? +order[idx + 1].dataset.drag : null) : +tile.dataset.drag;
-    tile.classList.add(after ? 'drop-after' : 'drop-before');
+    tile.classList.add((after ? 'drop-after' : 'drop-before') + (vertical ? '-v' : ''), after ? 'drop-after' : 'drop-before');
     st.target = { parent, before };
   } else if (!tile || tile === st.src) {
     zone.classList.add('drop-into');
@@ -630,7 +631,7 @@ async function viewUnit(uid, nid, query) {
 function locator(m, node) {
   const chain = chainOf(m, node.id);
   const at = lvl => chain.find(n => n.level === lvl);
-  const shelf = at('shelf'), piece = chain.find(n => n.level === 'rack' || n.level === 'space'), row = at('row'), box = at('box');
+  const shelf = at('shelf'), piece = chain.find(n => n.level === 'rack' || n.level === 'space');
   const shelves = kidsOf(m, null);
   const cellTitle = n => n.level === 'space' ? `${nodeLabel(n)} (${plural(looseCount(m, n.id), 'item')})` : `${nodeLabel(n)} — ${stats(m, n.id).used}/${stats(m, n.id).cap}`;
   let unitMap;
@@ -655,26 +656,16 @@ function locator(m, node) {
     }).join('');
     unitMap = h('div', { class: 'loc-map', html: `<svg viewBox="0 0 100 100" class="loc-dewar"><circle class="wall" cx="50" cy="50" r="48"/>${dots}</svg>` });
   } else {
-    const cellH = Math.max(3, Math.min(9, Math.floor(64 / Math.max(shelves.length, 1))));
+    // Portrait mini-freezer: shelves share its height, racks share each shelf's width.
     unitMap = h('div', { class: 'loc-map loc-cab' }, shelves.map(sh =>
       h('div', { class: 'loc-shelf' + (shelf && sh.id === shelf.id ? ' on' : ''), 'data-href': nodeHref(m, sh.id), title: nodeLabel(sh) },
         kidsOf(m, sh.id).length ? kidsOf(m, sh.id).map(p => h('i', {
           class: 'loc-cell' + (p.level === 'space' ? ' space' : '') + (piece && p.id === piece.id ? ' on' : ''),
-          style: { height: cellH + 'px', flex: `${p.level === 'space' ? (p.span || 1) : 1} 1 0` },
-          'data-href': nodeHref(m, p.id), title: cellTitle(p) })) : h('i', { class: 'loc-cell empty', style: { height: cellH + 'px' } }))));
+          style: { flex: `${p.level === 'space' ? (p.span || 1) : 1} 1 0` },
+          'data-href': nodeHref(m, p.id), title: cellTitle(p) })) : h('i', { class: 'loc-cell empty' }))));
   }
   const parts = [h('div', { class: 'loc-part' }, unitMap,
     h('span', null, [shelf, piece].filter(Boolean).map(nodeLabel).join(' · ') || m.unit.name))];
-  if (piece && piece.level === 'rack' && (row || box)) {
-    const rows = kidsOf(m, piece.id);
-    const rowH = Math.max(3, Math.min(9, Math.floor(64 / Math.max(rows.length, 1))));
-    parts.push(h('div', { class: 'loc-part' },
-      h('div', { class: 'loc-map loc-cab loc-rack' }, rows.map(r =>
-        h('div', { class: 'loc-shelf' + (row && r.id === row.id ? ' on' : ''), 'data-href': nodeHref(m, r.id), title: nodeLabel(r) },
-          kidsOf(m, r.id).map(b => h('i', { class: 'loc-cell' + (box && b.id === box.id ? ' on' : ''), style: { height: rowH + 'px' },
-            'data-href': nodeHref(m, b.id), title: cellTitle(b) }))))),
-      h('span', null, [row, box].filter(Boolean).map(nodeLabel).join(' · '))));
-  }
   return h('div', { class: 'locator', 'aria-label': 'Where you are in this unit' }, h('div', { class: 'loc-title' }, 'You are here'), h('div', { class: 'loc-parts' }, parts));
 }
 function legend(m) {
@@ -817,7 +808,7 @@ function rowView(m, row) {
   const boxes = kidsOf(m, row.id);
   if (!boxes.length) return h('div', { class: 'card empty-note' }, 'This row has no boxes yet — add boxes from the panel.');
   return h('div', null,
-    h('div', { class: 'rack-frame' }, h('div', { class: 'rack-row', 'data-drop-parent': row.id }, h('div', { class: 'row-boxes', style: { gap: '10px' } }, boxes.map(b => boxTile(m, b, true))))),
+    h('div', { class: 'rack-frame row-frame' }, h('div', { class: 'rack-row', 'data-drop-parent': row.id }, h('div', { class: 'row-boxes col' }, boxes.map(b => boxTile(m, b, true))))),
     h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Drag boxes to reorder them (long-press on a phone). Open the rack to move a box to another row.'));
 }
 
