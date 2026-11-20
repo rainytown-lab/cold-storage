@@ -16,6 +16,7 @@ Items live either in a box position (node = box, pos_row/pos_col set) or
 
 import json
 import os
+import secrets
 import sqlite3
 import threading
 
@@ -227,6 +228,12 @@ def init_db():
                 (p["name"], p["type"], p["manufacturer"], p["device_name"], p["model"], p.get("size"),
                  json.dumps(p["layout"]), json.dumps(p["plan"]) if p.get("plan") else None, p.get("notes")))
         conn.execute("INSERT INTO settings (key, value) VALUES ('presets_seeded', '1')")
+    # Labs set up before lab codes existed get one now (an admin can change it in Settings).
+    if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] and \
+            not conn.execute("SELECT 1 FROM settings WHERE key = 'join_code'").fetchone():
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+        conn.execute("INSERT INTO settings (key, value) VALUES ('join_code', ?)",
+                     ("".join(secrets.choice(alphabet) for _ in range(6)),))
     if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
         conn.executemany(
             "INSERT INTO categories (name, color, sort) VALUES (?, ?, ?)",

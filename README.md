@@ -12,8 +12,12 @@ PORT=9000 python3 app.py
 COLDSTORAGE_DB=/path/to.db python3 app.py
 ```
 
-The first visit asks you to create the lab and its first (admin) account. The
-admin adds everyone else under **Settings › People**.
+The first visit asks you to create the lab and its first (admin) account. Everyone
+else joins with the **lab code**: they choose "Join a lab" on the sign-in page, type
+the code and make their own account. Any member can see the code under
+**Settings › Lab**. Only an admin can change it or generate a new one (people who
+already joined keep their accounts). An admin can also add people directly
+under **Settings › People**, with a temporary password. Sign out from the top bar.
 
 ## What it does
 

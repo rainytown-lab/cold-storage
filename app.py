@@ -37,7 +37,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 4
+API_VERSION = 5
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -316,6 +316,7 @@ def setup(ctx):
     cur = conn.execute("INSERT INTO users (email, name, password_hash, role) VALUES (?,?,?, 'admin')",
                        (email, name, hash_password(pw)))
     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('lab_name', ?)", (lab,))
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('join_code', ?)", (new_join_code(),))
     ctx["set_cookie"] = _create_session(conn, cur.lastrowid)
     conn.commit()
     return {"ok": True}
@@ -347,12 +348,60 @@ def me(ctx):
             "lab_name": get_setting(ctx["conn"], "lab_name", "Cold Storage")}
 
 
+JOIN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O or 1/I mix-ups
+
+
+def new_join_code():
+    return "".join(secrets.choice(JOIN_ALPHABET) for _ in range(6))
+
+
+def clean_code(raw):
+    return re.sub(r"[^A-Z0-9]", "", str(raw or "").upper())
+
+
+@route("GET", "/api/lab")
+def get_lab(ctx):
+    """Lab name and join code — visible to every member so they can invite people."""
+    conn = ctx["conn"]
+    return {"lab_name": get_setting(conn, "lab_name", "Cold Storage"), "join_code": get_setting(conn, "join_code")}
+
+
 @route("PUT", "/api/lab", admin=True)
 def update_lab(ctx):
-    name = text(ctx["body"], "lab_name", 120)
-    require(name, "Lab name is required")
-    ctx["conn"].execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('lab_name', ?)", (name,))
-    ctx["conn"].commit()
+    conn, b = ctx["conn"], ctx["body"]
+    if "lab_name" in b:
+        name = text(b, "lab_name", 120)
+        require(name, "Lab name is required")
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('lab_name', ?)", (name,))
+    if b.get("regenerate_code"):
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('join_code', ?)", (new_join_code(),))
+    elif "join_code" in b:
+        code = clean_code(b["join_code"])
+        require(4 <= len(code) <= 12, "The lab code must be 4–12 letters or digits")
+        conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('join_code', ?)", (code,))
+    conn.commit()
+    return get_lab(ctx)
+
+
+@route("POST", "/api/join", auth=False)
+def join_lab(ctx):
+    """Create your own account by entering the lab code."""
+    conn, b = ctx["conn"], ctx["body"]
+    code = get_setting(conn, "join_code")
+    require(code and hmac.compare_digest(clean_code(b.get("code")), code),
+            "That lab code isn't right — ask someone in the lab (it's under Settings › Lab)", 403)
+    name, email, pw = text(b, "name", 120), text(b, "email", 200), b.get("password") or ""
+    require(name and email and "@" in email, "Name and a valid email are required")
+    require(len(pw) >= 6, "Password must be at least 6 characters")
+    existing = one(conn.execute("SELECT * FROM users WHERE email = ?", (email,)))
+    require(not existing, "There's already an account with that email — sign in instead"
+            + ("" if not existing or existing["active"] else " (or ask an admin to reactivate it)"), 409)
+    cur = conn.execute("INSERT INTO users (email, name, password_hash, role) VALUES (?,?,?, 'member')",
+                       (email, name, hash_password(pw)))
+    ctx["set_cookie"] = _create_session(conn, cur.lastrowid)
+    ctx["user"] = {"id": cur.lastrowid}
+    log(ctx, "user.join", f"{name} joined the lab")
+    conn.commit()
     return {"ok": True}
 
 

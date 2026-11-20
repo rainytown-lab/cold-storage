@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 4;   // must match API_VERSION in app.py
+const API_VERSION = 5;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
 const CHILD = { shelf: 'rack', rack: 'row', row: 'box', box: null, space: null };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
@@ -401,6 +401,9 @@ async function startApp() {
   $('#topbar').hidden = false;
   $('#lab-name').textContent = state.lab;
   document.title = `${state.lab} · Cold Storage`;
+  $('#me-box').replaceChildren(
+    h('a', { class: 'me-name', href: '#/settings', title: `Signed in as ${state.me.email}` }, ownerChip(state.me.id, false, { short: true })),
+    h('button', { class: 'btn sm ghost', onclick: signOut }, 'Sign out'));
   route();
 }
 function authShell(title, form) {
@@ -408,25 +411,54 @@ function authShell(title, form) {
   $('#banner').hidden = true;
   $('#app').replaceChildren(h('div', { class: 'auth' },
     h('div', { class: 'brand' }, h('span', { class: 'brand-mark' }), state.lab || 'Cold Storage'),
-    h('div', { class: 'card stack' }, h('h2', null, title), form)));
+    h('div', { class: 'card stack' }, title ? h('h2', null, title) : null, form)));
 }
-function showAuth() {
+function showAuth(mode = 'signin') {
   const err = h('p', { class: 'error' });
-  const form = h('form', { class: 'stack' },
-    field('Email', inp('email', '', { type: 'email', autocomplete: 'username', required: true })),
-    field('Password', inp('password', '', { type: 'password', autocomplete: 'current-password', required: true })),
-    err, h('button', { class: 'btn primary', type: 'submit', style: { width: '100%' } }, 'Sign in'),
-    h('p', { class: 'small muted' }, 'Accounts are created by a lab admin under Settings.'));
-  form.onsubmit = async e => {
-    e.preventDefault(); err.textContent = '';
-    try {
-      await api('POST', '/api/login', formData(form));
-      const me = await api('GET', '/api/me');
-      state.me = me.user; state.lab = me.lab_name;
-      await startApp();
-    } catch (x) { err.textContent = x.message; }
+  const tabs = h('div', { class: 'auth-tabs' },
+    h('button', { type: 'button', class: mode === 'signin' ? 'on' : '', onclick: () => showAuth('signin') }, 'Sign in'),
+    h('button', { type: 'button', class: mode === 'join' ? 'on' : '', onclick: () => showAuth('join') }, 'Join a lab'));
+  const done = async () => {
+    const me = await api('GET', '/api/me');
+    state.me = me.user; state.lab = me.lab_name;
+    await startApp();
   };
-  authShell('Sign in', form);
+  let form;
+  if (mode === 'join') {
+    const code = inp('code', '', { required: true, autocomplete: 'off', autocapitalize: 'characters', spellcheck: 'false', placeholder: 'e.g. SHERMN', class: 'input code-input' });
+    code.addEventListener('input', () => { code.value = code.value.toUpperCase(); });
+    form = h('form', { class: 'stack' },
+      h('p', { class: 'small muted' }, 'New here? Enter the lab code (anyone in the lab can find it under Settings › Lab) and make your account.'),
+      field('Lab code', code),
+      field('Your name', inp('name', '', { required: true, autocomplete: 'name' })),
+      field('Email', inp('email', '', { type: 'email', required: true, autocomplete: 'username' })),
+      field('Password', inp('password', '', { type: 'password', minlength: 6, required: true, autocomplete: 'new-password' }), 'at least 6 characters'),
+      err, h('button', { class: 'btn primary', type: 'submit', style: { width: '100%' } }, 'Join lab'));
+    form.onsubmit = async e => {
+      e.preventDefault(); err.textContent = '';
+      try { await api('POST', '/api/join', formData(form)); await done(); toast(`Welcome to ${state.lab}!`); }
+      catch (x) { err.textContent = x.message; }
+    };
+  } else {
+    form = h('form', { class: 'stack' },
+      field('Email', inp('email', '', { type: 'email', autocomplete: 'username', required: true })),
+      field('Password', inp('password', '', { type: 'password', autocomplete: 'current-password', required: true })),
+      err, h('button', { class: 'btn primary', type: 'submit', style: { width: '100%' } }, 'Sign in'),
+      h('p', { class: 'small muted' }, 'No account yet? ', h('a', { href: '#', onclick: e => { e.preventDefault(); showAuth('join'); } }, 'Join with your lab code'), '.'));
+    form.onsubmit = async e => {
+      e.preventDefault(); err.textContent = '';
+      try { await api('POST', '/api/login', formData(form)); await done(); }
+      catch (x) { err.textContent = x.message; }
+    };
+  }
+  authShell(null, h('div', { class: 'stack' }, tabs, form));
+}
+async function signOut() {
+  await api('POST', '/api/logout').catch(() => {});
+  state.me = null;
+  $('#me-box').replaceChildren();
+  showAuth();
+  toast('Signed out');
 }
 function showSetup() {
   const err = h('p', { class: 'error' });
@@ -1769,7 +1801,7 @@ async function viewSettings() {
       field('Current password', inp('current_password', '', { type: 'password', autocomplete: 'current-password' })),
       field('New password', inp('password', '', { type: 'password', autocomplete: 'new-password', minlength: 6 }), 'leave blank to keep')),
     h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'), h('span', { class: 'spacer' }),
-      h('button', { class: 'btn', type: 'button', onclick: async () => { await api('POST', '/api/logout').catch(() => {}); state.me = null; showAuth(); } }, 'Sign out')));
+      h('button', { class: 'btn', type: 'button', onclick: signOut }, 'Sign out')));
   meForm.onsubmit = async e => {
     e.preventDefault();
     const v = formData(meForm);
@@ -1778,12 +1810,30 @@ async function viewSettings() {
     if (await attempt(() => api('PUT', `/api/users/${state.me.id}`, body), 'Saved')) { state.me.name = v.name; refresh(); }
   };
 
-  const labForm = h('form', { class: 'row' }, h('input', { class: 'input', name: 'lab_name', value: state.lab, style: { flex: 1, minWidth: '200px' } }), h('button', { class: 'btn', type: 'submit' }, 'Rename lab'));
+  const lab = await api('GET', '/api/lab');
+  const codeBox = h('div', { class: 'join-code' }, h('span', { class: 'code' }, lab.join_code || '—'),
+    h('button', { class: 'btn sm', type: 'button', onclick: () => {
+      navigator.clipboard?.writeText(lab.join_code).then(() => toast('Lab code copied'), () => toast(lab.join_code));
+    } }, 'Copy'));
+  const labForm = h('form', { class: 'stack' },
+    h('div', { class: 'grid2' },
+      field('Lab name', h('input', { class: 'input', name: 'lab_name', value: state.lab })),
+      field('Lab code', h('input', { class: 'input code-input', name: 'join_code', value: lab.join_code || '', autocomplete: 'off' }), '4–12 letters or digits')),
+    h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'submit' }, 'Save'),
+      h('button', { class: 'btn', type: 'button', onclick: async () => {
+        if (!await confirmBox('Make a new lab code?', 'The current code stops working for new sign-ups. People who already joined are not affected.', { okText: 'New code' })) return;
+        if (await attempt(() => api('PUT', '/api/lab', { regenerate_code: true }), 'New lab code made')) refresh();
+      } }, 'Generate a new code')));
   labForm.onsubmit = async e => {
     e.preventDefault();
     const v = formData(labForm);
-    if (await attempt(() => api('PUT', '/api/lab', v), 'Saved')) { state.lab = v.lab_name; $('#lab-name').textContent = v.lab_name; }
+    if (await attempt(() => api('PUT', '/api/lab', { lab_name: v.lab_name, join_code: v.join_code }), 'Saved')) {
+      state.lab = v.lab_name; $('#lab-name').textContent = v.lab_name; refresh();
+    }
   };
+  const labCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Lab')),
+    h('p', { class: 'small muted', style: { marginBottom: '8px' } }, `To bring someone into ${state.lab}, give them this code. They choose “Join a lab” on the sign-in page and make their own account.`),
+    codeBox, isAdmin ? h('div', { style: { marginTop: '16px' } }, labForm) : null);
 
   return h('div', { style: { maxWidth: '860px' } },
     h('div', { class: 'page-head' }, h('div', { class: 'titles' }, h('h1', null, 'Settings'))),
@@ -1795,9 +1845,10 @@ async function viewSettings() {
     h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'People')),
       h('p', { class: 'small muted', style: { marginBottom: '8px' } }, 'Anyone here can be assigned to a whole unit, a shelf, rack, row, box or a single item. Mark things “Common” for shared lab stock.'),
       h('div', { class: 'table-wrap' }, userTable),
-      isAdmin ? addUserForm : h('p', { class: 'small faint', style: { marginTop: '10px' } }, 'Ask an admin to add people.')),
+      isAdmin ? [h('p', { class: 'small muted', style: { marginTop: '14px' } }, 'People can join themselves with the lab code (below), or you can add them here with a temporary password:'), addUserForm]
+        : h('p', { class: 'small faint', style: { marginTop: '10px' } }, 'New people can join with the lab code below.')),
     h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'My account')), meForm),
-    isAdmin ? h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Lab')), labForm) : null);
+    labCard);
 }
 
 // ------------------------------------------------------------------------ //
