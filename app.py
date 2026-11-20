@@ -17,6 +17,7 @@ import os
 import re
 import secrets
 import socket
+import sqlite3
 import urllib.parse
 from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,7 +45,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 7
+API_VERSION = 10
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -142,9 +143,35 @@ def verify_password(password, stored):
 
 
 def log(ctx, action, summary, item_id=None, unit_id=None):
+    """Record a change in the activity log, plus what's needed to undo it.
+
+    Undo info is read through a second connection, which still sees the data as it was before this
+    request (our changes aren't committed yet): the item's previous row, or the unit's whole layout."""
+    ctx.setdefault("batch", secrets.token_hex(8))
+    undo = None
+    try:
+        rc = db.read_conn()
+        if action.startswith("item.") and item_id:
+            r = rc.execute("SELECT * FROM items WHERE id = ?", (item_id,)).fetchone()
+            undo = {"kind": "item", "before": dict(r) if r else None}
+        elif action.startswith("node.") and unit_id and unit_id not in ctx.setdefault("_snapped", set()):
+            ctx["_snapped"].add(unit_id)
+            undo = {"kind": "layout", "unit_id": unit_id,
+                    "nodes": [dict(r) for r in rc.execute("SELECT * FROM nodes WHERE unit_id = ?", (unit_id,))],
+                    "items": [dict(r) for r in rc.execute(
+                        "SELECT id, unit_id, node_id, pos_row, pos_col, status FROM items WHERE unit_id = ?", (unit_id,))]}
+        elif action == "unit.edit" and unit_id:
+            r = rc.execute("SELECT * FROM units WHERE id = ?", (unit_id,)).fetchone()
+            undo = {"kind": "unit", "before": dict(r) if r else None}
+        elif action == "unit.add" and unit_id:
+            undo = {"kind": "unit.add"}
+        rc.close()
+    except sqlite3.Error:
+        undo = None
     ctx["conn"].execute(
-        "INSERT INTO activity (user_id, action, item_id, unit_id, summary) VALUES (?,?,?,?,?)",
-        (ctx["user"]["id"] if ctx.get("user") else None, action, item_id, unit_id, summary))
+        "INSERT INTO activity (user_id, action, item_id, unit_id, summary, batch, undo) VALUES (?,?,?,?,?,?,?)",
+        (ctx["user"]["id"] if ctx.get("user") else None, action, item_id, unit_id, summary, ctx["batch"],
+         json.dumps(undo) if undo else None))
 
 
 def get_setting(conn, key, default=None):
@@ -885,23 +912,39 @@ def _group(conn, ids, levels):
 
 @route("POST", "/api/nodes/to-space")
 def group_to_space(ctx):
-    """Turn several side-by-side racks / loose spaces into ONE loose space as wide as all of them.
-    Racks must be empty; items in selected loose spaces move into the new space."""
+    """Turn selected racks into loose space. mode "one" (default): side-by-side racks/spaces become ONE
+    loose space as wide as all of them (items in selected spaces move over). mode "each": every selected
+    rack becomes its own loose space in its own spot. Racks must be empty either way."""
     conn = ctx["conn"]
     nodes, sibs = _group(conn, ctx["body"].get("ids"), SHELF_CHILDREN)
-    idx = [sibs.index(n["id"]) for n in nodes]
-    require(idx == list(range(idx[0], idx[0] + len(idx))), "The selected pieces must be side by side")
+    mode = ctx["body"].get("mode") or "one"
+    require(mode in ("one", "each"), "Unknown option")
+    if mode == "one":
+        idx = [sibs.index(n["id"]) for n in nodes]
+        require(idx == list(range(idx[0], idx[0] + len(idx))), "The selected pieces must be side by side to make one space")
     for n in nodes:
         if n["level"] == "rack":
             cnt = _stored_under(conn, n["id"])
             tree0 = Tree(conn, n["unit_id"])
             require(cnt == 0, f"{tree0.label(tree0.nodes[n['id']])} still holds {cnt} item(s) — move or remove them first.", 409)
     unit_id, holder = nodes[0]["unit_id"], nodes[0]["parent_id"]
-    require(not (holder is None and unit_plan(conn, unit_id)),
-            "Racks in this tank sit in fixed slots — convert them one at a time from each rack's page")
     tree = Tree(conn, unit_id)
     labels = [tree.label(tree.nodes[n["id"]]) for n in nodes]
     _freeze_labels(conn, tree, {holder})
+    if mode == "each":
+        made = 0
+        for n in nodes:
+            if n["level"] != "rack":
+                continue
+            conn.execute("DELETE FROM nodes WHERE parent_id = ?", (n["id"],))
+            conn.execute("UPDATE nodes SET level = 'space', span = 1, name = ? WHERE id = ?",
+                         (_free_name(conn, unit_id, holder, "Loose space", n["id"]), n["id"]))
+            made += 1
+        log(ctx, "node.convert", f"Replaced {', '.join(labels)} with {made} separate loose space(s)", unit_id=unit_id)
+        conn.commit()
+        return {"ok": True, "made": made}
+    require(not (holder is None and unit_plan(conn, unit_id)),
+            "Racks in this tank sit in fixed slots, so they can't be combined — choose a separate space for each rack")
     keep = nodes[0]
     width = sum((n["span"] or 1) if n["level"] == "space" else 1 for n in nodes)
     for n in nodes[1:]:
@@ -913,6 +956,23 @@ def group_to_space(ctx):
     log(ctx, "node.convert", f"Replaced {', '.join(labels)} with one loose space ({width} rack-widths)", unit_id=unit_id)
     conn.commit()
     return {"ok": True, "id": keep["id"]}
+
+
+@route("POST", "/api/nodes/assign")
+def group_assign(ctx):
+    """Assign several racks / loose spaces to one person, to Common, or back to inheriting (owner_id null)."""
+    conn, b = ctx["conn"], ctx["body"]
+    nodes, _ = _group(conn, b.get("ids"), SHELF_CHILDREN + ("shelf", "row", "box"))
+    owner_id, is_common = owner_fields(conn, b)
+    for n in nodes:
+        conn.execute("UPDATE nodes SET owner_id = ?, is_common = ? WHERE id = ?", (owner_id, is_common, n["id"]))
+    tree = Tree(conn, nodes[0]["unit_id"])
+    who = "Common" if is_common else (conn.execute("SELECT name FROM users WHERE id = ?", (owner_id,)).fetchone()[0]
+                                      if owner_id else "nobody (inherit)")
+    log(ctx, "node.edit", f"Assigned {', '.join(tree.label(tree.nodes[n['id']]) for n in nodes)} to {who}",
+        unit_id=nodes[0]["unit_id"])
+    conn.commit()
+    return {"ok": True}
 
 
 @route("POST", "/api/nodes/to-racks")
@@ -1199,9 +1259,8 @@ def delete_preset(ctx):
 def _check_place(conn, unit_id, node_id, pos, exclude_item=None):
     """Validate a destination; returns the node row (or None for unit-level loose)."""
     require(conn.execute("SELECT 1 FROM units WHERE id = ?", (unit_id,)).fetchone(), "Storage unit not found", 404)
-    if not node_id:
-        require(pos is None, "Positions only exist inside boxes")
-        return None
+    # Everything has a place on the diagram: tubes go in a box, loose items in a loose space.
+    require(node_id, "Loose items go in a loose space — pick one, or add a loose space first")
     node = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ?", (node_id, unit_id)))
     require(node, "Location not found", 404)
     if node["level"] == "box":
@@ -1213,7 +1272,7 @@ def _check_place(conn, unit_id, node_id, pos, exclude_item=None):
             (node_id, r, c, exclude_item)).fetchone()
         require(not taken, f"That position already holds “{taken[0] if taken else ''}”", 409)
     else:
-        require(node["level"] in ("shelf", "space"), "Loose items go in a unit, on a shelf or in a loose space")
+        require(node["level"] == "space", "Loose items go in a loose space — pick one, or add a loose space first")
         require(pos is None, "Positions only exist inside boxes")
     return node
 
@@ -1496,12 +1555,119 @@ def activity(ctx):
     if q.get("to"):
         where.append("date(a.at) <= ?")
         args.append(as_date(q["to"], "to"))
-    sql = """SELECT a.*, u.name AS user_name FROM activity a LEFT JOIN users u ON u.id = a.user_id"""
+    sql = f"""SELECT a.id, a.at, a.user_id, a.action, a.item_id, a.unit_id, a.summary, a.batch, a.undone_at,
+                     u.name AS user_name, ub.name AS undone_by_name,
+                     (a.undo IS NOT NULL AND a.undone_at IS NULL AND NOT EXISTS ({LATER_CHANGE_SQL})) AS can_undo
+              FROM activity a LEFT JOIN users u ON u.id = a.user_id LEFT JOIN users ub ON ub.id = a.undone_by"""
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY a.id DESC LIMIT ?"
     args.append(as_int(q.get("limit") or 200, "limit", 1, 2000))
-    return rows(ctx["conn"].execute(sql, args))
+    out = rows(ctx["conn"].execute(sql, args))
+    # A batch (one action) is undoable only if every row in it is.
+    blocked = {r["batch"] for r in out if r["batch"] and not r["can_undo"] and not r["undone_at"]
+               and r["action"] not in ("undo",)}
+    for r in out:
+        r["can_undo"] = bool(r["can_undo"]) and r["batch"] not in blocked
+    return out
+
+
+# A later, still-standing change that touches the same thing (the item, or for layout and unit
+# changes the whole unit) blocks undo: undo the newest change first.
+LATER_CHANGE_SQL = """
+    SELECT 1 FROM activity b
+    WHERE b.id > a.id AND b.undone_at IS NULL AND b.action != 'undo' AND b.batch IS NOT a.batch
+      AND ((a.action LIKE 'item.%' AND b.item_id = a.item_id)
+        OR (a.action NOT LIKE 'item.%' AND b.unit_id = a.unit_id)
+        OR (a.action LIKE 'item.%' AND b.action LIKE 'node.%' AND b.unit_id = a.unit_id))"""
+
+
+@route("POST", "/api/activity/<id>/undo")
+def undo_activity(ctx):
+    """Undo one action (all log rows from the same request), newest row first."""
+    conn = ctx["conn"]
+    aid = as_int(ctx["params"]["id"], "id")
+    a = one(conn.execute("SELECT * FROM activity WHERE id = ?", (aid,)))
+    require(a, "Not found", 404)
+    batch = rows(conn.execute("SELECT * FROM activity WHERE batch = ? ORDER BY id DESC", (a["batch"],))) if a["batch"] else [a]
+    require(not any(r["undone_at"] for r in batch), "That was already undone")
+    require(all(r["undo"] for r in batch if r["action"] not in ("node.edit",)) and any(r["undo"] for r in batch),
+            "This kind of change can't be undone")
+    for r in batch:
+        later = conn.execute(f"SELECT 1 FROM activity a WHERE a.id = ? AND EXISTS ({LATER_CHANGE_SQL})", (r["id"],)).fetchone()
+        require(not later, "Something changed there afterwards — undo the newer change first (undo works newest-first)", 409)
+    for r in batch:
+        if r["undo"]:
+            _apply_undo(conn, json.loads(r["undo"]), r)
+    for r in batch:
+        conn.execute("UPDATE activity SET undone_at = datetime('now'), undone_by = ? WHERE id = ?", (ctx["user"]["id"], r["id"]))
+    what = a["summary"] if len(batch) == 1 else f"{len(batch)} changes ({batch[-1]['summary']}…)"
+    conn.execute("INSERT INTO activity (user_id, action, item_id, unit_id, summary) VALUES (?,?,?,?,?)",
+                 (ctx["user"]["id"], "undo", a["item_id"] if len(batch) == 1 else None, a["unit_id"], f"Undid: {lowerfirst(what)}"))
+    conn.commit()
+    return {"ok": True, "count": len(batch)}
+
+
+def lowerfirst(t):
+    return t[:1].lower() + t[1:] if t else t
+
+
+ITEM_RESTORE_COLS = ("unit_id", "node_id", "pos_row", "pos_col", "loose_where", "name", "category_id", "owner_id",
+                     "is_common", "quantity", "concentration", "source", "lot", "expiry_date", "notes", "status",
+                     "date_added", "date_removed", "removed_by", "removal_reason", "last_location")
+UNIT_RESTORE_COLS = ("name", "location", "size", "manufacturer", "device_name", "model", "serial_number",
+                     "inventory_number", "last_defrost", "last_pm", "notes", "owner_id", "is_common", "plan")
+
+
+def _apply_undo(conn, u, row):
+    kind = u["kind"]
+    if kind == "item":
+        before, iid = u["before"], row["item_id"]
+        if before is None:      # it was added → take it out again entirely
+            require(iid and conn.execute("SELECT 1 FROM items WHERE id = ?", (iid,)).fetchone(), "That item no longer exists")
+            conn.execute("UPDATE activity SET item_id = NULL WHERE item_id = ? AND id != ?", (iid, row["id"]))
+            conn.execute("DELETE FROM items WHERE id = ?", (iid,))
+            return
+        if before["status"] == "stored":
+            require(before["unit_id"] and conn.execute("SELECT 1 FROM units WHERE id = ?", (before["unit_id"],)).fetchone(),
+                    "Its storage unit no longer exists")
+            if before["node_id"]:
+                require(conn.execute("SELECT 1 FROM nodes WHERE id = ?", (before["node_id"],)).fetchone(),
+                        "Where it was no longer exists in the layout")
+            if before["pos_row"] is None:
+                lvl = conn.execute("SELECT level FROM nodes WHERE id = ?", (before["node_id"],)).fetchone() if before["node_id"] else None
+                require(lvl and lvl[0] == "space", "It was a loose item outside a loose space — use Move to put it in one")
+            if before["pos_row"] is not None:
+                taken = conn.execute("SELECT name FROM items WHERE node_id = ? AND pos_row = ? AND pos_col = ? AND status = 'stored'"
+                                     " AND id != ?", (before["node_id"], before["pos_row"], before["pos_col"], iid)).fetchone()
+                require(not taken, f"Its old position is now taken by “{taken[0] if taken else ''}”", 409)
+        conn.execute(f"UPDATE items SET {', '.join(c + ' = ?' for c in ITEM_RESTORE_COLS)}, updated_at = datetime('now') WHERE id = ?",
+                     (*[before[c] for c in ITEM_RESTORE_COLS], iid))
+    elif kind == "layout":
+        uid = u["unit_id"]
+        require(conn.execute("SELECT 1 FROM units WHERE id = ?", (uid,)).fetchone(), "That storage unit no longer exists")
+        conn.execute("DELETE FROM nodes WHERE unit_id = ?", (uid,))
+        # Re-insert parents before children so every parent reference is valid as it's written.
+        pending, done = list(u["nodes"]), set()
+        while pending:
+            ready = [n for n in pending if n["parent_id"] is None or n["parent_id"] in done]
+            require(ready, "The saved layout is inconsistent — can't undo this one")
+            for n in ready:
+                conn.execute(f"INSERT INTO nodes ({', '.join(n)}) VALUES ({', '.join('?' * len(n))})", tuple(n.values()))
+                done.add(n["id"])
+            pending = [n for n in pending if n["id"] not in done]
+        for it in u["items"]:
+            conn.execute("UPDATE items SET unit_id = ?, node_id = ?, pos_row = ?, pos_col = ?, status = ? WHERE id = ?",
+                         (it["unit_id"], it["node_id"], it["pos_row"], it["pos_col"], it["status"], it["id"]))
+    elif kind == "unit":
+        b = u["before"]
+        require(b, "Nothing to restore")
+        conn.execute(f"UPDATE units SET {', '.join(c + ' = ?' for c in UNIT_RESTORE_COLS)} WHERE id = ?",
+                     (*[b.get(c) for c in UNIT_RESTORE_COLS], row["unit_id"]))
+    elif kind == "unit.add":
+        n = conn.execute("SELECT COUNT(*) FROM items WHERE unit_id = ?", (row["unit_id"],)).fetchone()[0]
+        require(n == 0, "Items have been added to it since — remove them first", 409)
+        conn.execute("DELETE FROM units WHERE id = ?", (row["unit_id"],))
 
 
 @route("GET", "/api/stats")

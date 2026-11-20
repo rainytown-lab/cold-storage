@@ -158,7 +158,11 @@ CREATE TABLE IF NOT EXISTS activity (
     action   TEXT NOT NULL,      -- item.add | item.remove | item.move | item.edit | item.restore | unit.* | node.*
     item_id  INTEGER REFERENCES items(id) ON DELETE SET NULL,
     unit_id  INTEGER REFERENCES units(id) ON DELETE SET NULL,
-    summary  TEXT NOT NULL
+    summary  TEXT NOT NULL,
+    batch    TEXT,               -- one id per user action (a request), so it's undone as a whole
+    undo     TEXT,               -- JSON: how things were just before (see app.py, Undo)
+    undone_at TEXT,
+    undone_by INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_activity_item ON activity(item_id);
 CREATE INDEX IF NOT EXISTS idx_activity_at   ON activity(at);
@@ -246,6 +250,47 @@ def _flatten_ln2(conn):
             conn.execute("UPDATE presets SET layout = ? WHERE id = ?", (json.dumps(new), pid))
 
 
+def read_conn():
+    """A separate connection: it sees only committed data, i.e. how things were before the
+    current request's (not yet committed) changes. Used to record undo information."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _home_loose_items(conn):
+    """Every loose item must sit in a loose space (a drawn section of the unit), like a tube sits in a
+    box. Items left directly in a unit or on a shelf by older versions get a new loose space beside
+    the racks: on their shelf, on the first shelf (freezers), or in the tank. Safe to run every start."""
+    strays = conn.execute("""
+        SELECT i.id, i.unit_id, i.node_id, u.type FROM items i JOIN units u ON u.id = i.unit_id
+        LEFT JOIN nodes n ON n.id = i.node_id
+        WHERE i.status = 'stored' AND i.pos_row IS NULL AND (i.node_id IS NULL OR n.level != 'space')""").fetchall()
+    made = {}
+    for iid, uid, node_id, utype in strays:
+        holder = node_id
+        if holder is None and utype != "ln2":
+            first = conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS NULL AND level = 'shelf'"
+                                 " ORDER BY position, id LIMIT 1", (uid,)).fetchone()
+            if not first:
+                cur = conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position) VALUES (?, NULL, 'shelf', 0)", (uid,))
+                first = (cur.lastrowid,)
+            holder = first[0]
+        key = (uid, holder)
+        if key not in made:
+            taken = {r[0] for r in conn.execute("SELECT name FROM nodes WHERE unit_id = ? AND parent_id IS ? AND name IS NOT NULL",
+                                                (uid, holder))}
+            n = 1
+            while f"Loose space {n}" in taken:
+                n += 1
+            pos = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM nodes WHERE unit_id = ? AND parent_id IS ?",
+                               (uid, holder)).fetchone()[0]
+            cur = conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, span, name) VALUES (?,?, 'space', ?, 1, ?)",
+                               (uid, holder, pos, f"Loose space {n}"))
+            made[key] = cur.lastrowid
+        conn.execute("UPDATE items SET node_id = ? WHERE id = ?", (made[key], iid))
+
+
 def init_db():
     conn = get_conn()
     conn.executescript(SCHEMA)
@@ -253,6 +298,12 @@ def init_db():
     cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
     if "span" not in cols:
         conn.execute("ALTER TABLE nodes ADD COLUMN span INTEGER NOT NULL DEFAULT 1")
+    acols = {r[1] for r in conn.execute("PRAGMA table_info(activity)")}
+    for col, decl in (("batch", "TEXT"), ("undo", "TEXT"), ("undone_at", "TEXT"), ("undone_by", "INTEGER")):
+        if col not in acols:
+            conn.execute(f"ALTER TABLE activity ADD COLUMN {col} {decl}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_unit ON activity(unit_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_activity_batch ON activity(batch)")
     ucols = {r[1] for r in conn.execute("PRAGMA table_info(units)")}
     for col in ("device_name", "plan"):
         if col not in ucols:
@@ -267,6 +318,7 @@ def init_db():
                  json.dumps(p["layout"]), json.dumps(p["plan"]) if p.get("plan") else None, p.get("notes")))
         conn.execute("INSERT INTO settings (key, value) VALUES ('presets_seeded', '1')")
     _flatten_ln2(conn)
+    _home_loose_items(conn)
     # Labs set up before lab codes existed get one now (an admin can change it in Settings).
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] and \
             not conn.execute("SELECT 1 FROM settings WHERE key = 'join_code'").fetchone():

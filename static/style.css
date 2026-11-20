@@ -1,58 +1,63 @@
 /* Cold Storage — design system (light + dark) */
 :root {
-  --bg: #f4f6fa;
+  /* Cold palette: ice, steel and deep-water blues */
+  --bg: #eef4f9;
   --surface: #ffffff;
-  --surface-2: #eef1f7;
-  --surface-3: #e3e8f1;
-  --border: #dde2ec;
-  --text: #182033;
-  --text-soft: #56607a;
-  --text-faint: #8d95ab;
-  --primary: #4f46e5;
-  --primary-dark: #4338ca;
-  --primary-soft: #eceefe;
+  --surface-2: #eaf1f7;
+  --surface-3: #dce7f0;
+  --border: #d5e1ec;
+  --text: #0f1f33;
+  --text-soft: #4a5f78;
+  --text-faint: #8399b0;
+  --primary: #0369a1;
+  --primary-dark: #075985;
+  --primary-soft: #e0f2fe;
+  --ice: #7dd3fc;
   --danger: #dc2626;
   --danger-soft: #fdecec;
   --warn: #b45309;
   --warn-soft: #fef3c7;
-  --ok: #15803d;
-  --fill: #4f46e5;          /* occupancy colour */
-  --empty: #e8ecf4;         /* empty slot */
-  --steel: #cfd6e3;         /* cabinet frame */
-  --steel-dark: #aab4c6;
+  --ok: #0f766e;
+  --fill: #0284c7;          /* occupancy colour */
+  --empty: #e3edf5;         /* empty slot */
+  --steel: #c9d8e6;         /* cabinet frame */
+  --steel-dark: #9fb4c8;
   --t-ln2: #0891b2;
-  --t-80: #4f46e5;
+  --t-80: #1e40af;
   --t-20: #2563eb;
-  --t-4: #059669;
+  --t-4: #0d9488;
+  --nav-bg: linear-gradient(100deg, #0b2a4a 0%, #0c3b5e 55%, #0e4a6e 100%);
   --radius: 14px;
   --radius-sm: 9px;
-  --shadow: 0 1px 2px rgba(20, 28, 48, .06), 0 4px 16px rgba(20, 28, 48, .05);
-  --shadow-lg: 0 18px 50px rgba(20, 28, 48, .22);
+  --shadow: 0 1px 2px rgba(15, 40, 70, .06), 0 4px 16px rgba(15, 40, 70, .06);
+  --shadow-lg: 0 18px 50px rgba(15, 40, 70, .22);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #11141c;
-    --surface: #1a1e2a;
-    --surface-2: #222838;
-    --surface-3: #2b3245;
-    --border: #2f3649;
-    --text: #e9ecf5;
-    --text-soft: #a5adc4;
-    --text-faint: #6f7790;
-    --primary: #818cf8;
-    --primary-dark: #6366f1;
-    --primary-soft: #262b52;
+    --bg: #0a1422;
+    --surface: #0f1d2e;
+    --surface-2: #15263a;
+    --surface-3: #1c3048;
+    --border: #22374f;
+    --text: #e6f0f8;
+    --text-soft: #9fb3c8;
+    --text-faint: #64809b;
+    --primary: #38bdf8;
+    --primary-dark: #0ea5e9;
+    --primary-soft: #0c2d48;
     --danger: #f87171;
     --danger-soft: #3a1f24;
     --warn: #fbbf24;
     --warn-soft: #3a2f16;
-    --fill: #818cf8;
-    --empty: #262c3d;
-    --steel: #343c52;
-    --steel-dark: #4a536c;
-    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+    --fill: #38bdf8;
+    --empty: #17283b;
+    --steel: #22374f;
+    --steel-dark: #34506d;
+    --t-80: #3b82f6;
+    --nav-bg: linear-gradient(100deg, #061527 0%, #08213a 60%, #0a2c49 100%);
+    --shadow: 0 1px 2px rgba(0,0,0,.35), 0 4px 16px rgba(0,0,0,.3);
     color-scheme: dark;
   }
 }
@@ -522,3 +527,65 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .layout-list li { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .layout-list li:last-child { border-bottom: 0; }
 .layout-list a { font-weight: 600; }
+.choice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.choice > span { display: flex; flex-direction: column; gap: 2px; }
+.choice input { margin-top: 3px; }
+.choice:has(input:checked) { border-color: var(--primary); background: var(--primary-soft); }
+.choice.off { opacity: .55; cursor: default; }
+table.list tr.undone .what { text-decoration: line-through; color: var(--text-faint); }
+.feed .act.undo { background: var(--warn); }
+
+/* =====================================================================
+   v2 — cold theme chrome + layout clean-up
+   ===================================================================== */
+main { max-width: 1440px; }
+h1 { font-size: 26px; font-weight: 750; }
+
+/* Top bar: deep-water navy with ice accents */
+#topbar { background: var(--nav-bg); border-bottom: 0; box-shadow: 0 2px 14px rgba(5, 25, 45, .25); color: #fff; }
+.brand { color: #fff; }
+.brand-mark { background: linear-gradient(160deg, #e0f2fe, #38bdf8); box-shadow: 0 0 0 1px rgba(255,255,255,.25); }
+.brand-mark::before, .brand-mark::after { background: rgba(8, 47, 73, .45); }
+#nav a { color: rgba(255, 255, 255, .72); }
+#nav a:hover { background: rgba(255, 255, 255, .08); color: #fff; }
+#nav a.active { background: rgba(125, 211, 252, .16); color: #fff; box-shadow: inset 0 -2px 0 var(--ice); }
+#quick-search input { background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .16); color: #fff; }
+#quick-search input::placeholder { color: rgba(255, 255, 255, .6); }
+#quick-search input:focus { background: rgba(255, 255, 255, .16); outline-color: rgba(125, 211, 252, .6); border-color: var(--ice); }
+#me-box .chip { color: #fff; }
+#me-box .btn.ghost { color: rgba(255, 255, 255, .85); }
+#me-box .btn.ghost:hover { background: rgba(255, 255, 255, .1); }
+
+/* Cards & controls: a touch crisper */
+.card { border-color: var(--border); }
+.card-head h3 { color: var(--text-soft); }
+.btn.primary { box-shadow: 0 1px 2px rgba(3, 105, 161, .25); }
+.stat { position: relative; overflow: hidden; box-shadow: var(--shadow); }
+.stat::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: linear-gradient(var(--ice), var(--fill)); }
+.stat b { color: var(--primary-dark); }
+.unit-card h2 { font-size: 18px; }
+.loc-group > h3 { display: flex; align-items: center; gap: 8px; }
+.loc-group > h3::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+/* Unit page: the drawing column is as wide as the drawing; the panels fill the rest
+   (side by side when there's room), so there's no empty gutter in the middle. */
+.unit-layout { grid-template-columns: auto minmax(0, 1fr); gap: 28px; }
+.diagram { width: 440px; max-width: 100%; }
+.diagram.wide { width: min(720px, 100%); }
+.diagram > .toolbar { margin-bottom: 8px; }
+.diagram > .legend { margin-bottom: 12px; }
+.side { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 16px; align-content: start; }
+.side > .card + .card { margin-top: 0; }
+.side > .card { padding: 18px; }
+.page-head { padding-bottom: 14px; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+@media (max-width: 1000px) {
+  .unit-layout { grid-template-columns: 1fr; }
+  .diagram { width: 100%; max-width: 480px; }
+  .diagram.wide { max-width: 100%; }
+}
+
+/* Diagrams: frosty steel frames */
+.cabinet, .rack-frame { background: linear-gradient(180deg, var(--steel), color-mix(in srgb, var(--steel) 70%, var(--steel-dark))); }
+.cabinet-top .display { background: #04121f; color: var(--ice); box-shadow: inset 0 0 0 1px rgba(125, 211, 252, .25); }
+.dewar .inner { fill: color-mix(in srgb, var(--ice) 14%, var(--surface)); }
+.feed li > .chip { align-self: flex-start; flex: none; }

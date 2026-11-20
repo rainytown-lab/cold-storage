@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 7;   // must match API_VERSION in app.py
+const API_VERSION = 10;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
 // Levels per storage type. LN2 tanks have no shelves or rows: racks stand in the tank and
@@ -706,7 +706,8 @@ async function viewUnit(uid, nid, query) {
       h('div', { class: 'titles' }, h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('h1', null, title)), h('p', null, sub)),
       node ? null : h('a', { class: 'btn', href: `#/unit/${uid}/edit` }, 'Edit details')),
     h('div', { class: 'unit-layout' },
-      h('div', { class: 'diagram', 'data-dnd': true, 'data-unit': uid }, h('div', { class: 'toolbar' }, hl, legend(m), h('span', { class: 'spacer' })),
+      h('div', { class: 'diagram' + (node && node.level === 'box' ? ' wide' : ''), 'data-dnd': true, 'data-unit': uid },
+        h('div', { class: 'toolbar' }, hl, h('span', { class: 'spacer' })), legend(m),
         !node || node.level === 'shelf' ? pieceToolbar(m) : null, diagram),
       h('div', { class: 'side' }, node ? nodeSide(m, node) : unitSide(m))));
 }
@@ -779,26 +780,67 @@ function pieceToolbar(m) {
   if (!picked.length) parts.push(h('span', { class: 'small faint' }, sel.on ? 'Click racks or loose spaces to select them' : 'Tip: shift-click racks to select several'));
   else {
     parts.push(h('span', { class: 'small muted' }, `${picked.length} selected`));
-    if (!arranged && (picked.length > 1 || picked[0].level === 'rack'))
-      parts.push(h('button', { class: 'btn sm primary', onclick: () => groupToSpace(m, picked) }, picked.length > 1 ? 'Make one loose space' : 'Make loose space'));
+    if (picked.some(p => p.level === 'rack') || picked.length > 1)
+      parts.push(h('button', { class: 'btn sm primary', onclick: () => groupToSpace(m, picked) }, 'Make loose space…'));
     if (picked.every(p => p.level === 'space'))
       parts.push(h('button', { class: 'btn sm', onclick: () => groupToRacks(m, picked) }, 'Make into racks'));
+    parts.push(h('button', { class: 'btn sm', onclick: () => groupAssign(m, picked) }, 'Assign…'));
     parts.push(h('button', { class: 'btn sm ghost', onclick: clear }, 'Clear'));
     if (picked.length > 1 && !arranged) parts.push(h('span', { class: 'small faint' }, 'Drag any of them to move them together'));
   }
   return h('div', { class: 'toolbar sel-bar' }, parts);
 }
-async function groupToSpace(m, picked) {
-  const ordered = [...picked].sort((a, b) => kidsOf(m, a.parent_id).indexOf(a) - kidsOf(m, b.parent_id).indexOf(b));
+function groupToSpace(m, picked) {
+  const sibs = kidsOf(m, picked[0].parent_id);
+  const ordered = [...picked].sort((a, b) => sibs.indexOf(a) - sibs.indexOf(b));
   const busy = ordered.filter(p => p.level === 'rack' && stats(m, p.id).used);
   if (busy.length) { toast(`${busy.map(nodeLabel).join(', ')} still hold${busy.length === 1 ? 's' : ''} items — move or remove them first.`, true); return; }
+  const idx = ordered.map(p => sibs.indexOf(p));
+  const adjacent = idx.every((v, i) => i === 0 || v === idx[i - 1] + 1);
+  const arranged = isTank(m) && planFits(unitPlan(m.unit), sibs);
   const width = ordered.reduce((a, p) => a + (p.level === 'space' ? (p.span || 1) : 1), 0);
-  const ok = await confirmBox(`Make ${ordered.map(nodeLabel).join(', ')} into one loose space?`,
-    `They become a single loose space ${width} rack-width${width > 1 ? 's' : ''} wide, in the same place. Empty racks and their boxes are removed; items already in selected loose spaces move into the new one.`,
-    { okText: 'Make loose space' });
-  if (!ok) return;
-  const r = await attempt(() => api('POST', '/api/nodes/to-space', { ids: ordered.map(p => p.id) }), 'Done — one loose space');
-  if (r) { state.pieceSel.ids.clear(); state.pieceSel.on = false; refresh(); }
+  const racks = ordered.filter(p => p.level === 'rack');
+  const canOne = adjacent && !arranged && ordered.length > 1;
+  const why = arranged ? 'This tank has fixed slots, so racks can’t be combined.' : !adjacent ? 'The selected pieces aren’t side by side.' : '';
+  const opt = (value, title, desc, enabled = true) => h('label', { class: 'choice' + (enabled ? '' : ' off') },
+    h('input', { type: 'radio', name: 'mode', value, disabled: !enabled }), h('span', null, h('b', null, title), h('span', { class: 'small muted' }, desc)));
+  const form = h('form', { class: 'stack' },
+    h('p', { class: 'small muted' }, `Selected: ${ordered.map(nodeLabel).join(', ')}. Empty racks and their boxes are removed.`),
+    opt('one', `One loose space, ${width} rack-widths wide`, canOne ? 'Combines them into a single space in the same place. Items already in selected loose spaces move into it.' : (why || 'Select at least two pieces.'), canOne),
+    opt('each', `A separate loose space for each rack (${plural(racks.length, 'space')})`, racks.length ? 'Each rack becomes its own 1-wide loose space in its own spot. Selected loose spaces stay as they are.' : 'No racks are selected.', racks.length > 0));
+  const first = form.querySelector('input[name=mode]:not(:disabled)');
+  if (first) first.checked = true;
+  const err = h('p', { class: 'error' });
+  form.append(err);
+  const go = async () => {
+    const mode = form.querySelector('input[name=mode]:checked')?.value;
+    if (!mode) { err.textContent = 'Nothing to do for this selection.'; return; }
+    try {
+      await api('POST', '/api/nodes/to-space', { ids: ordered.map(p => p.id), mode });
+      close(); toast(mode === 'one' ? 'Made one loose space' : `Made ${plural(racks.length, 'loose space')}`);
+      state.pieceSel.ids.clear(); state.pieceSel.on = false; refresh();
+    } catch (x) { err.textContent = x.message; }
+  };
+  form.onsubmit = e => { e.preventDefault(); go(); };
+  const close = openModal({ title: 'Make loose space', body: form,
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Make loose space')] });
+}
+function groupAssign(m, picked) {
+  const holder = picked[0].parent_id ? m.nodes.get(picked[0].parent_id) : null;
+  const inh = nodeOwner(m, picked[0].parent_id || null);
+  const inhLabel = inh.owner_id || inh.common
+    ? `Inherit — ${ownerName(inh.owner_id, inh.common)} (from ${inh.from})` : `Nobody — inherit from ${holder ? nodeLabel(holder) : m.unit.name}`;
+  const sel = ownerSelect(null, false, inhLabel);
+  const same = picked.every(p => p.owner_id === picked[0].owner_id && !!p.is_common === !!picked[0].is_common);
+  if (same) sel.value = picked[0].is_common ? 'common' : (picked[0].owner_id ? String(picked[0].owner_id) : '');
+  const go = async () => {
+    if (await attempt(() => api('POST', '/api/nodes/assign', { ids: picked.map(p => p.id), ...ownerPayload(sel.value) }),
+      `Assigned ${plural(picked.length, 'piece')}`)) { close(); refresh(); }
+  };
+  const close = openModal({ title: `Assign ${picked.length > 1 ? plural(picked.length, 'piece') : nodeLabel(picked[0])}`,
+    body: h('div', { class: 'stack' }, h('p', { class: 'small muted' }, `${picked.map(nodeLabel).join(', ')} — everything inside follows unless it has its own owner.`),
+      field('Assign to', sel)),
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Assign')] });
 }
 function groupToRacks(m, picked) {
   if (picked.some(p => looseCount(m, p.id))) { toast('Empty the selected loose spaces first — their items need a new home.', true); return; }
@@ -1160,16 +1202,23 @@ function layoutEditCard(m) {
       ? 'To rename, reassign, re-fill or convert a rack, click it in the tank diagram. Shift-click (or “Select racks”) to pick several and turn them into one loose space, or drag them together.'
       : 'To rename, reassign or convert a shelf or rack, click it in the freezer diagram. Shift-click (or “Select racks”) to pick several racks and turn them into one loose space, or drag them together.'));
 }
-function looseCard(m, shelf) {
-  const list = m.loose.filter(i => shelf ? i.node_id === shelf.id : true);
-  const where = it => {
-    if (!it.node_id) return it.loose_where || '';
-    return [chainOf(m, it.node_id).map(nodeLabel).join(' › '), it.loose_where].filter(Boolean).join(' · ');
-  };
+/** Loose spaces within reach of `scope`: the whole unit (null), a shelf, or a single loose space. */
+function spacesIn(m, scope) {
+  if (scope && scope.level === 'space') return [scope];
+  const holders = scope ? [scope.id] : (isTank(m) ? [null] : kidsOf(m, null).map(sh => sh.id));
+  return holders.flatMap(hid => kidsOf(m, hid).filter(x => x.level === 'space'));
+}
+/** Loose items card: everything lives in a loose space, so this lists the items in the spaces in scope. */
+function looseCard(m, scope) {
+  const spaces = spacesIn(m, scope);
+  const ids = new Set(spaces.map(sp => sp.id));
+  const list = m.loose.filter(i => ids.has(i.node_id));
+  const isSpace = scope && scope.level === 'space';
+  const where = it => [chainOf(m, it.node_id).slice(scope ? 1 : 0).map(nodeLabel).join(' › '), it.loose_where].filter(Boolean).join(' · ');
   return h('div', { class: 'card' },
     h('div', { class: 'card-head' }, h('h3', null, `Loose items (${list.length})`),
-      h('button', { class: 'btn sm', onclick: () => openItemForm({ m, shelf, loose: true }) }, '+ Add')),
-    state.moving ? h('button', { class: 'btn sm primary', style: { marginBottom: '10px' }, onclick: () => moveLoose(m, shelf) }, `Put “${state.moving.name}” here as loose item`) : null,
+      spaces.length ? h('button', { class: 'btn sm', onclick: () => openItemForm({ m, shelf: scope, loose: true }) }, '+ Add') : null),
+    isSpace && state.moving ? h('button', { class: 'btn sm primary', style: { marginBottom: '10px' }, onclick: () => moveLoose(m, scope) }, `Put “${state.moving.name}” here`) : null,
     list.length ? h('ul', { class: 'feed' }, list.map(it => {
       const o = itemOwner(m, it);
       return h('li', { class: 'clickable' + (ownerMatch(o) ? '' : ' dim'), onclick: () => openItem(it.id) },
@@ -1178,11 +1227,13 @@ function looseCard(m, shelf) {
           it.quantity ? h('span', { class: 'muted' }, ' · ' + it.quantity) : null,
           h('div', { class: 'small faint' }, where(it))),
         ownerChip(o.owner_id, o.common, { short: true, inherit: o.from !== 'item' }));
-    })) : h('p', { class: 'small faint' }, shelf ? `Nothing in this ${shelf.level === 'space' ? 'loose space' : 'shelf'} yet.` : 'Items that are not in a box or rack (bags, bottles, flasks…) go here.'));
+    })) : h('p', { class: 'small faint' }, spaces.length
+      ? (isSpace ? 'Nothing in this loose space yet.' : 'Nothing in the loose spaces here yet.')
+      : `Loose items (bottles, bags, kits…) go in a loose space on the diagram. ${scope ? 'This shelf has none yet — use “+ Add loose space” below, or select racks and choose “Make loose space…”.' : 'There are none yet — select racks and choose “Make loose space…”, or add one from a shelf or Details › Edit.'}`));
 }
-async function moveLoose(m, shelf) {
+async function moveLoose(m, space) {
   const mv = state.moving;
-  const ok = await attempt(() => api('POST', `/api/items/${mv.id}/move`, { unit_id: m.unit.id, node_id: shelf ? shelf.id : null }), 'Moved');
+  const ok = await attempt(() => api('POST', `/api/items/${mv.id}/move`, { unit_id: m.unit.id, node_id: space.id }), 'Moved');
   if (ok) { state.moving = null; refresh(); }
 }
 function nodeSide(m, node) {
@@ -1637,11 +1688,10 @@ function openItemForm(opts) {
   const err = h('p', { class: 'error' });
   let whereSel = null;
   if (opts.loose && m) {
-    whereSel = h('select', { class: 'input', name: '_where' }, h('option', { value: '' }, `${m.unit.name} (general)`),
-      kidsOf(m, null).map(s => s.level === 'space' ? h('option', { value: s.id }, nodeLabel(s))
-        : s.level === 'shelf' ? [h('option', { value: s.id }, nodeLabel(s)),
-          kidsOf(m, s.id).filter(x => x.level === 'space').map(sp => h('option', { value: sp.id }, `${nodeLabel(s)} › ${nodeLabel(sp)}`))] : null));
-    whereSel.value = opts.shelf ? String(opts.shelf.id) : '';
+    // Loose items always go into a loose space: offer the spaces in reach (all of them as a fallback).
+    const choices = spacesIn(m, opts.shelf || null).length ? spacesIn(m, opts.shelf || null) : spacesIn(m, null);
+    whereSel = h('select', { class: 'input', name: '_where', required: true },
+      choices.map(sp => h('option', { value: sp.id }, chainOf(m, sp.id).map(nodeLabel).join(' › '))));
   }
   const fillIn = opts.allowFill ? inp('_fill', 1, { type: 'number', min: 1, max: box.grid_rows * box.grid_cols }) : null;
   const fillNote = h('span', { class: 'hint' });
@@ -1686,7 +1736,7 @@ function openItemForm(opts) {
       field('Lot / batch / passage', inp('lot', src.lot)),
       field('Date added', inp('date_added', src.date_added || todayISO(), { type: 'date' })),
       field('Expiry date', inp('expiry_date', src.expiry_date, { type: 'date' })),
-      loose && whereSel ? field('Where', whereSel) : null,
+      loose && whereSel ? field('Loose space', whereSel) : null,
       loose ? field('Spot', inp('loose_where', src.loose_where, { placeholder: 'e.g. door, bottom bin, bag 3' }), 'optional', whereSel ? null : 'span-all') : null,
       editing && item.status === 'removed' ? field('Date removed', inp('date_removed', item.date_removed, { type: 'date' })) : null,
       editing && item.status === 'removed' ? field('Removal reason', inp('removal_reason', item.removal_reason, { list: 'reason-list' })) : null,
@@ -1708,7 +1758,10 @@ function openItemForm(opts) {
       } else {
         body.unit_id = m.unit.id;
         if (box) { body.node_id = box.id; body.positions = fillPositions(); }
-        else body.node_id = whereSel && whereSel.value ? +whereSel.value : null;
+        else {
+          if (!whereSel || !whereSel.value) throw new Error('Pick a loose space — or add one to the diagram first.');
+          body.node_id = +whereSel.value;
+        }
         if (box && !body.positions.length) throw new Error('No empty positions left in this box.');
         const r = await api('POST', '/api/items', body);
         toast(r.ids.length > 1 ? `Added ${r.ids.length} items` : 'Item added');
@@ -1855,6 +1908,16 @@ function daysAhead(n) { const d = new Date(); d.setDate(d.getDate() + n); return
 // ------------------------------------------------------------------------ //
 // Activity log
 // ------------------------------------------------------------------------ //
+async function undoActivity(a, rowsA, after) {
+  const same = a.batch ? rowsA.filter(r => r.batch === a.batch) : [a];
+  const ok = await confirmBox('Undo this change?',
+    same.length > 1
+      ? `This reverses the whole action — ${same.length} log entries, e.g. “${lowerFirst(same[same.length - 1].summary)}”.`
+      : `This reverses: “${lowerFirst(a.summary)}”.`,
+    { okText: 'Undo' });
+  if (!ok) return;
+  if (await attempt(() => api('POST', `/api/activity/${a.id}/undo`), same.length > 1 ? `Undid ${same.length} changes` : 'Undone')) after();
+}
 async function viewActivity(query) {
   const units = await api('GET', '/api/units');
   const unit = h('select', { class: 'input' }, h('option', { value: '' }, 'All storage'), units.map(u => h('option', { value: u.id }, u.name)));
@@ -1862,7 +1925,7 @@ async function viewActivity(query) {
   const user = h('select', { class: 'input' }, h('option', { value: '' }, 'Everyone'), state.users.map(u => h('option', { value: u.id }, u.name)));
   user.value = query.user_id || '';
   const action = h('select', { class: 'input' }, h('option', { value: '' }, 'All actions'),
-    [['item.add', 'Added'], ['item.remove', 'Removed'], ['item.move', 'Moved'], ['item.edit', 'Edited'], ['item.restore', 'Put back'], ['unit', 'Storage units'], ['node', 'Layout changes']]
+    [['item.add', 'Added'], ['item.remove', 'Removed'], ['item.move', 'Moved'], ['item.edit', 'Edited'], ['item.restore', 'Put back'], ['unit', 'Storage units'], ['node', 'Layout changes'], ['undo', 'Undos']]
       .map(([v, l]) => h('option', { value: v }, l)));
   action.value = query.action || '';
   const from = inp('from', query.from, { type: 'date' });
@@ -1877,11 +1940,15 @@ async function viewActivity(query) {
     if (to.value) p.set('to', to.value);
     const rowsA = await api('GET', '/api/activity?' + p);
     out.replaceChildren(h('div', { class: 'card' }, h('div', { class: 'table-wrap' }, rowsA.length ? h('table', { class: 'list' },
-      h('thead', null, h('tr', null, ['When', 'Who', 'What'].map(x => h('th', null, x)))),
-      h('tbody', null, rowsA.map(a => h('tr', { class: a.item_id ? 'clickable' : '', onclick: a.item_id ? () => openItem(a.item_id) : null },
+      h('thead', null, h('tr', null, ['When', 'Who', 'What', ''].map(x => h('th', null, x)))),
+      h('tbody', null, rowsA.map(a => h('tr', { class: (a.item_id ? 'clickable' : '') + (a.undone_at ? ' undone' : ''), onclick: a.item_id ? () => openItem(a.item_id) : null },
         h('td', { class: 'small muted', style: { whiteSpace: 'nowrap' }, title: a.at + ' UTC' }, new Date(a.at.replace(' ', 'T') + 'Z').toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })),
         h('td', { style: { whiteSpace: 'nowrap', fontWeight: 600 } }, a.user_name || '—'),
-        h('td', null, h('span', { class: 'row', style: { flexWrap: 'nowrap', alignItems: 'flex-start' } }, h('span', { class: 'feed' }, h('span', { class: 'act ' + a.action.split('.')[1], style: { display: 'inline-block', marginTop: '6px' } })), a.summary))))))
+        h('td', null, h('span', { class: 'row', style: { flexWrap: 'nowrap', alignItems: 'flex-start' } }, h('span', { class: 'feed' }, h('span', { class: 'act ' + (a.action.split('.')[1] || a.action), style: { display: 'inline-block', marginTop: '6px' } })),
+          h('span', null, h('span', { class: 'what' }, a.summary),
+            a.undone_at ? h('span', { class: 'small faint' }, ` — undone${a.undone_by_name ? ' by ' + a.undone_by_name : ''} ${fmtWhen(a.undone_at)}`) : null))),
+        h('td', { style: { textAlign: 'right', whiteSpace: 'nowrap' } }, a.can_undo
+          ? h('button', { class: 'btn sm', title: 'Reverse this change', onclick: e => { e.stopPropagation(); undoActivity(a, rowsA, run); } }, '↶ Undo') : null)))))
       : h('p', { class: 'empty-note' }, 'No activity matches.'))));
   };
   for (const s of [unit, user, action, from, to]) s.addEventListener('change', run);

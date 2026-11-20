@@ -55,18 +55,22 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   expiry, date added, notes. Click an empty position to add an item, and use
   "Number of tubes" to fill the next N positions with aliquots. Shift-click (or
   "Select positions") selects several at once to add or remove in bulk.
-- **Loose items**: things that aren't in a box can sit in the unit itself, on a
-  shelf, or in a **loose space**, with a free-text spot ("door", "bottom bin").
+- **Loose items**: things that aren't in a box always live in a **loose space**,
+  a drawn section of the shelf or tank (like a tube lives in a box), with an
+  optional free-text spot ("door", "bottom bin"). Loose items left outside a loose
+  space by older versions are moved into a new loose space on their shelf (or in
+  the tank) when the server starts.
 - **Loose spaces**: a loose space is room on a shelf for bottles, bags and kits.
   It sits in line with the racks and is 1–N rack-widths wide. Open an empty rack
   and click "Replace with loose space" (or the reverse) to swap one for the other
   in the same spot.
 - **Selecting several racks**: shift-click racks or loose spaces (or click "Select
   racks" and then click them) to select several on one shelf or in one tank.
-  "Make one loose space" turns side-by-side selected pieces into a single loose space
-  as wide as all of them (the racks must be empty). "Make into racks" turns
-  selected loose spaces back into racks, one per rack-width. Dragging any selected
-  piece moves the whole group, in order.
+  "Make loose space…" offers one loose space as wide as all of them (side-by-side
+  pieces only) or a separate loose space for each rack (the racks must be empty
+  either way). "Make into racks" turns selected loose spaces back into racks, one
+  per rack-width. "Assign…" gives them all to a person or to Common, or puts them
+  back to inheriting. Dragging any selected piece moves the whole group, in order.
 - **Editing the layout**: a unit's Details › Edit page lists what's on each shelf
   (or in the tank) and has "+ Add shelf" / "+ Add rack", "+ Add loose space",
   "Save as preset" and Delete. Individual pieces are changed from the diagram.
@@ -91,6 +95,11 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   export to CSV.
 - **Log**: every add, remove, move, edit and layout change, with who did it and
   when. Each item also has its own history.
+- **Undo**: most entries in the Log have an "↶ Undo" button. One action is undone
+  as a whole, even if it wrote several log lines (adding 3 aliquots, removing 5
+  tubes, converting 4 racks). Undo goes newest-first: if something later touched
+  the same item, or the same unit for layout changes, undo that first. Changes
+  made before this feature existed (and deleting a whole unit) can't be undone.
 - **Categories**: Cells, Plasmids, Antibodies, Glycerol stocks, DNA, RNA, Protein,
   … You can add, rename and recolour them under Settings.
 
