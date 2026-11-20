@@ -352,3 +352,70 @@ table.list .nm { font-weight: 600; }
   .cell .pos { display: none; }
 }
 @media (max-width: 440px) { .grid2, .grid3 { grid-template-columns: 1fr; } .span2 { grid-column: auto; } }
+
+/* ---------- Loose spaces & drag-and-drop ---------- */
+.space-tile { background: repeating-linear-gradient(135deg, var(--surface) 0 8px, var(--surface-2) 8px 16px); border-style: dashed; border-color: var(--steel-dark); }
+.space-items { list-style: none; font-size: 11px; line-height: 1.35; }
+.space-items li { display: flex; gap: 5px; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.space-items .dot { width: 7px; height: 7px; border-radius: 2px; }
+.empty-shelf { min-height: 56px; align-items: center; justify-content: center; border: 1px dashed var(--border); border-radius: 8px; padding: 8px; color: var(--text-faint); font-size: 13px; }
+.dewar .rk.space rect { fill: var(--surface); stroke-dasharray: 4 3; }
+[data-dnd] [data-drag] { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+[data-dnd] .rack-tile { cursor: grab; }
+body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select: none; }
+.dragging { opacity: .35; }
+.drag-ghost { position: fixed; z-index: 70; pointer-events: none; padding: 6px 12px; border-radius: 8px; background: var(--primary); color: #fff; font-weight: 700; font-size: 13px; box-shadow: var(--shadow-lg); transform: translate(-50%, -130%); white-space: nowrap; }
+.rack-tile.drop-before { box-shadow: -4px 0 0 0 var(--primary); }
+.rack-tile.drop-after { box-shadow: 4px 0 0 0 var(--primary); }
+.dewar .rk.drop-before rect, .dewar .rk.drop-after rect { stroke: var(--primary); stroke-width: 3; }
+.shelf.drop-into, .dewar.drop-into { outline: 2px dashed var(--primary); outline-offset: 2px; border-radius: 8px; }
+
+/* ---------- "You are here" locator ---------- */
+.locator { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 6px 10px 8px; box-shadow: var(--shadow); }
+.loc-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--text-faint); margin-bottom: 4px; }
+.loc-parts { display: flex; gap: 12px; align-items: flex-start; }
+.loc-part { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.loc-part > span { font-size: 11px; font-weight: 600; color: var(--text-soft); max-width: 120px; text-align: center; line-height: 1.2; }
+.loc-map { width: 96px; }
+.loc-cab { background: var(--steel); border-radius: 6px; padding: 3px; display: flex; flex-direction: column; gap: 2px; }
+.loc-rack { width: 72px; border-radius: 4px; }
+.loc-shelf { display: flex; gap: 2px; padding: 2px; border-radius: 3px; background: var(--surface); cursor: pointer; }
+.loc-shelf.on { background: var(--primary-soft); box-shadow: inset 0 0 0 1px var(--primary); }
+.loc-cell { flex: 1 1 0; border-radius: 2px; background: var(--surface-3); cursor: pointer; }
+.loc-cell:hover { background: var(--steel-dark); }
+.loc-cell.space { background: repeating-linear-gradient(135deg, var(--surface-3) 0 2px, transparent 2px 4px); }
+.loc-cell.empty { background: transparent; cursor: default; }
+.loc-cell.on, .loc-cell.on:hover { background: var(--primary); }
+.loc-dewar { width: 96px; height: 96px; display: block; }
+.loc-dewar .wall { fill: color-mix(in srgb, var(--t-ln2) 10%, var(--surface)); stroke: var(--steel-dark); stroke-width: 2.5; }
+.loc-dewar circle[data-href] { fill: var(--surface-3); stroke: var(--steel-dark); stroke-width: .8; cursor: pointer; }
+.loc-dewar circle.space { fill: var(--surface); stroke-dasharray: 2 1.5; }
+.loc-dewar circle.on { fill: var(--primary); stroke: var(--primary); }
+@media (max-width: 720px) { .page-head .locator { order: 10; width: 100%; } .loc-parts { justify-content: center; } }
+
+/* ---------- One-line shelves & summary tiles ----------
+   Racks/spaces on a shelf (and boxes in a rack row) never wrap: they shrink together so
+   the drawing keeps the real left-to-right order and proportions at any window width. */
+.racks, .row-boxes { flex-wrap: nowrap; }
+.racks > .rack-tile { flex: 1 1 0; min-width: 0; }
+.racks > .space-tile { min-width: 0; }
+.rack-tile { min-height: 64px; display: flex; flex-direction: column; padding: 6px 7px; }
+.racks.big { gap: 10px; }
+.racks.big > .rack-tile { min-height: 120px; padding: 10px; }
+.racks.big .lbl { font-size: 13px; }
+.rack-tile .lbl, .box-tile .lbl { margin-bottom: 2px; min-width: 0; }
+.rack-tile .lbl span, .box-tile .lbl span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tile-sub { font-size: 11px; color: var(--text-faint); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gauge { margin-top: auto; height: 5px; border-radius: 3px; background: var(--empty); overflow: hidden; }
+.gauge > i { display: block; height: 100%; background: var(--fill); border-radius: 3px; }
+.rack-tile .owner-bar, .box-tile .owner-bar { margin-top: 4px; }
+.box-tile { flex: 1 1 0; min-width: 0; max-width: none; min-height: 52px; display: flex; flex-direction: column; padding: 5px 6px; }
+.box-tile.big { min-width: 0; max-width: none; min-height: 90px; padding: 9px; }
+.space-tile .tile-sub { color: var(--text-soft); }
+.dewar .rk text.long { font-size: 9px; }
+@media (max-width: 720px) {
+  .racks, .row-boxes { gap: 3px; }
+  .rack-tile, .box-tile { padding: 4px; }
+  .rack-tile .lbl, .box-tile .lbl { font-size: 10px; }
+  .tile-sub { font-size: 9.5px; }
+}

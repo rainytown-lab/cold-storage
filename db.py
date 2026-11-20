@@ -88,8 +88,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     unit_id     INTEGER NOT NULL REFERENCES units(id) ON DELETE CASCADE,
     parent_id   INTEGER REFERENCES nodes(id) ON DELETE CASCADE,
-    level       TEXT NOT NULL,          -- shelf | rack | row | box
+    level       TEXT NOT NULL,          -- shelf | rack | row | box | space (loose-item area on a shelf)
     position    INTEGER NOT NULL DEFAULT 0,
+    span        INTEGER NOT NULL DEFAULT 1,  -- spaces: how many rack-widths it takes up
     name        TEXT,                   -- NULL = default label ("Rack 3")
     owner_id    INTEGER REFERENCES users(id) ON DELETE SET NULL,
     is_common   INTEGER NOT NULL DEFAULT 0,
@@ -162,6 +163,10 @@ DEFAULT_CATEGORIES = [
 def init_db():
     conn = get_conn()
     conn.executescript(SCHEMA)
+    # Lightweight migrations for databases created by older versions.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
+    if "span" not in cols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN span INTEGER NOT NULL DEFAULT 1")
     if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
         conn.executemany(
             "INSERT INTO categories (name, color, sort) VALUES (?, ?, ?)",

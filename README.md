@@ -25,8 +25,11 @@ admin adds everyone else under **Settings › People**.
   delete, rename or reassign any shelf, rack, row or box, and resize a box
   (e.g. 9×9, 10×10, 8×12, or a custom size; positions labelled A1… or 1…n).
 - **Interactive diagram**: freezers and fridges show a front view, LN₂ tanks a top
-  view. You click into a rack, then a row, then a box, then a position. Fill levels
-  are colour-coded and tubes are coloured by category. "Highlight" dims everything
+  view. You click into a rack, then a row, then a box, then a position. Each level
+  shows only a summary of the level below (name and how full it is). The tubes,
+  coloured by category, appear only once you open a box. Pieces on a shelf, and
+  boxes in a row, always stay on one line in their real order and proportions,
+  whatever the window width. "Highlight" dims everything
   that doesn't belong to the chosen person (or to Common).
 - **Assignments**: a person or **Common** can be set on a unit, shelf, rack, row,
   box or a single item. Anything left unassigned inherits from the level above it.
@@ -34,8 +37,18 @@ admin adds everyone else under **Settings › People**.
   expiry, date added, notes. Click an empty position to add an item, and use
   "Number of tubes" to fill the next N positions with aliquots. Shift-click (or
   "Select positions") selects several at once to add or remove in bulk.
-- **Loose items**: things that aren't in a box can sit in the unit itself or on a
-  shelf, with a free-text spot ("door", "bottom bin").
+- **Loose items**: things that aren't in a box can sit in the unit itself, on a
+  shelf, or in a **loose space**, with a free-text spot ("door", "bottom bin").
+- **Loose spaces**: a loose space is room on a shelf for bottles, bags and kits.
+  It sits in line with the racks and is 1–N rack-widths wide. Open an empty rack
+  and click "Replace with loose space" (or the reverse) to swap one for the other
+  in the same spot.
+- **Drag & drop**: drag racks and loose spaces to reorder them or move them to
+  another shelf. This works in the freezer front view and the LN₂ top view; on a
+  phone, long-press first. A rack or space keeps its name when it moves. The side
+  panel also has "Move left / right" and "Shelf" controls.
+- **You are here**: inside a shelf, rack, row or box, a mini map in the header
+  highlights where you are in the unit (and in the rack). Click it to jump.
 - **Move**: open an item, click Move, then click an empty position in any box in
   any unit, or put it somewhere as a loose item.
 - **Remove / put back**: removal records the date, the person and a reason. Removed

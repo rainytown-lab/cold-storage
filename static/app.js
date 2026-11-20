@@ -19,8 +19,8 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box' };
-const CHILD = { shelf: 'rack', rack: 'row', row: 'box', box: null };
+const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
+const CHILD = { shelf: 'rack', rack: 'row', row: 'box', box: null, space: null };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
 const GRID_PRESETS = [[9, 9], [10, 10], [8, 12], [5, 5], [7, 7], [8, 8], [4, 4]];
 const USER_COLORS = ['#e4572e', '#3b82f6', '#8b5cf6', '#059669', '#d97706', '#db2777', '#0891b2', '#65a30d', '#7c3aed', '#dc2626', '#0d9488', '#9333ea'];
@@ -251,9 +251,99 @@ async function refresh() {
 }
 window.addEventListener('hashchange', () => { route().then(() => window.scrollTo(0, 0)); });
 document.addEventListener('click', e => {
+  if (Date.now() < dnd.suppressClickUntil) { e.preventDefault(); e.stopPropagation(); return; }
   const t = e.target.closest('[data-href]');
   if (t && !e.defaultPrevented) { e.preventDefault(); location.hash = t.dataset.href; }
 });
+
+// ------------------------------------------------------------------------ //
+// Drag & drop of racks / loose spaces between positions and shelves.
+// Pointer events (not HTML5 DnD) so it works on SVG (LN2 view) and touch.
+// Mouse: drag after moving 6px.  Touch/pen: long-press 350 ms, then drag.
+// ------------------------------------------------------------------------ //
+const dnd = { st: null, suppressClickUntil: 0 };
+function dndClear() { for (const el of document.querySelectorAll('.drop-before, .drop-after, .drop-into')) el.classList.remove('drop-before', 'drop-after', 'drop-into'); }
+function dndStart() {
+  const st = dnd.st;
+  st.active = true;
+  st.src.classList.add('dragging');
+  document.body.classList.add('is-dragging');
+  const label = st.src.querySelector('.lbl span')?.textContent || st.src.querySelector('title')?.textContent.split(' — ')[0] || 'Rack';
+  st.ghost = h('div', { class: 'drag-ghost', style: { left: st.x + 'px', top: st.y + 'px' } }, label);
+  document.body.append(st.ghost);
+  if (navigator.vibrate && st.touch) navigator.vibrate(15);
+}
+function dndTarget(x, y) {
+  const st = dnd.st;
+  dndClear();
+  st.target = null;
+  const el = document.elementFromPoint(x, y);
+  const zone = el && el.closest('[data-drop-parent]');
+  if (!zone || !zone.closest('[data-dnd]')) return;
+  const parent = +zone.dataset.dropParent;
+  const tile = el.closest('[data-drag]');
+  if (tile && tile !== st.src && zone.contains(tile)) {
+    const r = tile.getBoundingClientRect();
+    const after = x > r.left + r.width / 2;
+    const order = [...zone.querySelectorAll('[data-drag]')].filter(t => t !== st.src);
+    const idx = order.indexOf(tile);
+    const before = after ? (order[idx + 1] ? +order[idx + 1].dataset.drag : null) : +tile.dataset.drag;
+    tile.classList.add(after ? 'drop-after' : 'drop-before');
+    st.target = { parent, before };
+  } else if (!tile || tile === st.src) {
+    zone.classList.add('drop-into');
+    st.target = tile === st.src ? null : { parent, before: null };
+  }
+}
+function dndEnd(commit) {
+  const st = dnd.st;
+  dnd.st = null;
+  if (!st) return;
+  clearTimeout(st.timer);
+  if (!st.active) return;
+  dnd.suppressClickUntil = Date.now() + 400;
+  st.src.classList.remove('dragging');
+  document.body.classList.remove('is-dragging');
+  st.ghost?.remove();
+  dndClear();
+  if (!commit || !st.target) return;
+  // Skip no-op drops (same shelf, same slot).
+  const sibs = [...st.src.closest('[data-drop-parent]').querySelectorAll('[data-drag]')].map(t => +t.dataset.drag);
+  const i = sibs.indexOf(st.id);
+  if (st.target.parent === st.fromParent && (st.target.before === sibs[i + 1] || (st.target.before === null && i === sibs.length - 1))) return;
+  attempt(() => api('POST', `/api/nodes/${st.id}/place`, { parent_id: st.target.parent, before_id: st.target.before }))
+    .then(r => { if (r) toast(r.renamed ? `Moved — renamed to “${r.renamed}” (name was taken on that shelf)` : 'Moved'); refresh(); });
+}
+document.addEventListener('pointerdown', e => {
+  if (e.button !== 0 || dnd.st) return;
+  const src = e.target.closest('[data-drag]');
+  if (!src || !src.closest('[data-dnd]')) return;
+  const zone = src.closest('[data-drop-parent]');
+  if (!zone) return;
+  const touch = e.pointerType !== 'mouse';
+  dnd.st = { src, id: +src.dataset.drag, fromParent: +zone.dataset.dropParent, x: e.clientX, y: e.clientY, touch, active: false, target: null };
+  if (touch) dnd.st.timer = setTimeout(() => { if (dnd.st && !dnd.st.active) { dndStart(); dndTarget(dnd.st.x, dnd.st.y); } }, 350);
+});
+document.addEventListener('pointermove', e => {
+  const st = dnd.st;
+  if (!st) return;
+  if (!st.active) {
+    const d = Math.hypot(e.clientX - st.x, e.clientY - st.y);
+    if (st.touch) { if (d > 10) { clearTimeout(st.timer); dnd.st = null; } return; }   // finger moved first: it's a scroll
+    if (d < 6) return;
+    dndStart();
+  }
+  st.ghost.style.left = e.clientX + 'px';
+  st.ghost.style.top = e.clientY + 'px';
+  dndTarget(e.clientX, e.clientY);
+});
+document.addEventListener('pointerup', () => dndEnd(true));
+document.addEventListener('pointercancel', () => dndEnd(false));
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && dnd.st) dndEnd(false); });
+// While dragging on a touch screen, stop the page from scrolling.
+document.addEventListener('touchmove', e => { if (dnd.st && dnd.st.active) e.preventDefault(); }, { passive: false });
+// Long-press would otherwise open the browser's context menu / link preview.
+document.addEventListener('contextmenu', e => { if (dnd.st) e.preventDefault(); });
 
 function renderBanner() {
   const b = $('#banner');
@@ -404,7 +494,8 @@ function buildModel(data) {
   }
   for (const list of m.kids.values()) {
     list.sort((a, b) => a.position - b.position || a.id - b.id);
-    list.forEach((n, i) => { n.index = i; });
+    const per = {};   // number per level: "Rack 3" ignores loose spaces between racks
+    for (const n of list) { n.index = per[n.level] = (per[n.level] ?? -1) + 1; }
   }
   for (const it of data.items) {
     if (it.pos_row == null) m.loose.push(it);
@@ -441,6 +532,7 @@ function stats(m, id) {           // {used, cap} for a node subtree
   const n = m.nodes.get(id);
   let s;
   if (n.level === 'box') s = { used: (m.byBox.get(id) || []).length, cap: n.grid_rows * n.grid_cols };
+  else if (n.level === 'space') s = { used: 0, cap: 0 };
   else {
     s = { used: 0, cap: 0 };
     for (const c of kidsOf(m, id)) { const cs = stats(m, c.id); s.used += cs.used; s.cap += cs.cap; }
@@ -513,11 +605,63 @@ async function viewUnit(uid, nid, query) {
     crumbs,
     h('div', { class: 'page-head' },
       h('div', { class: 'titles' }, h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('h1', null, title)), h('p', null, sub)),
+      node ? locator(m, node) : null,
       h('a', { class: 'btn', href: back }, '↑ Up'),
       node ? null : h('a', { class: 'btn', href: `#/unit/${uid}/edit` }, 'Edit details')),
     h('div', { class: 'unit-layout' },
-      h('div', { class: 'diagram' }, h('div', { class: 'toolbar' }, hl, legend(m), h('span', { class: 'spacer' })), diagram),
+      h('div', { class: 'diagram', 'data-dnd': true, 'data-unit': uid }, h('div', { class: 'toolbar' }, hl, legend(m), h('span', { class: 'spacer' })), diagram),
       h('div', { class: 'side' }, node ? nodeSide(m, node) : unitSide(m))));
+}
+/** "You are here": a tiny map of the whole unit (and of the rack, once inside one), current spot highlighted. */
+function locator(m, node) {
+  const chain = chainOf(m, node.id);
+  const at = lvl => chain.find(n => n.level === lvl);
+  const shelf = at('shelf'), piece = chain.find(n => n.level === 'rack' || n.level === 'space'), row = at('row'), box = at('box');
+  const shelves = kidsOf(m, null);
+  const cellTitle = n => n.level === 'space' ? `${nodeLabel(n)} (${plural(looseCount(m, n.id), 'item')})` : `${nodeLabel(n)} — ${stats(m, n.id).used}/${stats(m, n.id).cap}`;
+  let unitMap;
+  if (m.unit.type === 'ln2') {
+    const sh = shelf || shelves[0];
+    const pieces = kidsOf(m, sh.id);
+    const slots = [];
+    pieces.forEach(p => { for (let k = 0; k < (p.level === 'space' ? (p.span || 1) : 1); k++) slots.push(p); });
+    const n = slots.length, C = 50;
+    const pos = i => {
+      if (n === 1) return [C, C];
+      const outer = n > 9 ? n - Math.min(7, Math.round(n / 3)) : n;
+      const [idx, cnt, R] = i < outer ? [i, outer, n <= 4 ? 20 : n > 9 ? 32 : 27] : [i - outer, n - outer, 15];
+      const a = -Math.PI / 2 + 2 * Math.PI * idx / cnt;
+      return [C + R * Math.cos(a), C + R * Math.sin(a)];
+    };
+    const r = Math.max(3, Math.min(8, n ? 70 / n : 8));
+    const dots = slots.map((p, i) => {
+      const [x, y] = pos(i);
+      const on = piece && p.id === piece.id;
+      return `<circle class="${on ? 'on' : ''}${p.level === 'space' ? ' space' : ''}" data-href="${nodeHref(m, p.id)}" cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}"><title>${esc(cellTitle(p))}</title></circle>`;
+    }).join('');
+    unitMap = h('div', { class: 'loc-map', html: `<svg viewBox="0 0 100 100" class="loc-dewar"><circle class="wall" cx="50" cy="50" r="48"/>${dots}</svg>` });
+  } else {
+    const cellH = Math.max(3, Math.min(9, Math.floor(64 / Math.max(shelves.length, 1))));
+    unitMap = h('div', { class: 'loc-map loc-cab' }, shelves.map(sh =>
+      h('div', { class: 'loc-shelf' + (shelf && sh.id === shelf.id ? ' on' : ''), 'data-href': nodeHref(m, sh.id), title: nodeLabel(sh) },
+        kidsOf(m, sh.id).length ? kidsOf(m, sh.id).map(p => h('i', {
+          class: 'loc-cell' + (p.level === 'space' ? ' space' : '') + (piece && p.id === piece.id ? ' on' : ''),
+          style: { height: cellH + 'px', flex: `${p.level === 'space' ? (p.span || 1) : 1} 1 0` },
+          'data-href': nodeHref(m, p.id), title: cellTitle(p) })) : h('i', { class: 'loc-cell empty', style: { height: cellH + 'px' } }))));
+  }
+  const parts = [h('div', { class: 'loc-part' }, unitMap,
+    h('span', null, [shelf, piece].filter(Boolean).map(nodeLabel).join(' · ') || m.unit.name))];
+  if (piece && piece.level === 'rack' && (row || box)) {
+    const rows = kidsOf(m, piece.id);
+    const rowH = Math.max(3, Math.min(9, Math.floor(64 / Math.max(rows.length, 1))));
+    parts.push(h('div', { class: 'loc-part' },
+      h('div', { class: 'loc-map loc-cab loc-rack' }, rows.map(r =>
+        h('div', { class: 'loc-shelf' + (row && r.id === row.id ? ' on' : ''), 'data-href': nodeHref(m, r.id), title: nodeLabel(r) },
+          kidsOf(m, r.id).map(b => h('i', { class: 'loc-cell' + (box && b.id === box.id ? ' on' : ''), style: { height: rowH + 'px' },
+            'data-href': nodeHref(m, b.id), title: cellTitle(b) }))))),
+      h('span', null, [row, box].filter(Boolean).map(nodeLabel).join(' · '))));
+  }
+  return h('div', { class: 'locator', 'aria-label': 'Where you are in this unit' }, h('div', { class: 'loc-title' }, 'You are here'), h('div', { class: 'loc-parts' }, parts));
 }
 function legend(m) {
   const used = new Set(m.items.map(i => i.category_id));
@@ -525,25 +669,37 @@ function legend(m) {
   if (!cats.length) return null;
   return h('div', { class: 'legend' }, cats.map(c => h('span', null, h('i', { class: 'dot', style: { background: c.color } }), c.name)));
 }
-function miniRack(m, rack) {
-  const rowsN = kidsOf(m, rack.id);
-  if (!rowsN.length) return h('div', { class: 'faint small' }, 'empty');
-  return h('div', { class: 'mini' }, rowsN.slice(0, 20).map(r => {
-    const boxes = kidsOf(m, r.id);
-    return h('div', { class: 'mini-row' }, boxes.length
-      ? boxes.slice(0, 16).map(b => h('i', { class: nodeMatches(m, b.id) ? '' : 'dim', style: { background: fillColor(frac(stats(m, b.id))) }, title: `${nodeLabel(r)} · ${nodeLabel(b)}: ${stats(m, b.id).used}/${stats(m, b.id).cap}` }))
-      : h('i', { style: { opacity: .4 } }));
-  }));
+/** Thin fill gauge: a summary of this container only, not a picture of what's inside it. */
+function fillGauge(s) {
+  return h('div', { class: 'gauge' }, h('i', { style: { width: (s.cap ? Math.round(100 * frac(s)) : 0) + '%' } }));
+}
+function ownerBar(n) {
+  return (n.owner_id || n.is_common) ? h('div', { class: 'owner-bar', style: { background: n.is_common ? 'var(--text-faint)' : userColor(n.owner_id) }, title: ownerName(n.owner_id, n.is_common) }) : null;
 }
 function rackTile(m, rack) {
   const s = stats(m, rack.id);
-  const o = (rack.owner_id || rack.is_common) ? rack : null;
-  return h('div', { class: 'rack-tile' + (nodeMatches(m, rack.id) ? '' : ' dim'), 'data-href': nodeHref(m, rack.id), title: `${nodeLabel(rack)} — ${s.used}/${s.cap} filled` },
-    h('div', { class: 'lbl' }, h('span', null, nodeLabel(rack)), h('em', null, s.cap ? Math.round(100 * frac(s)) + '%' : '')),
-    miniRack(m, rack),
-    o ? h('div', { class: 'owner-bar', style: { background: o.is_common ? 'var(--text-faint)' : userColor(o.owner_id) }, title: ownerName(o.owner_id, o.is_common) }) : null);
+  return h('div', { class: 'rack-tile' + (nodeMatches(m, rack.id) ? '' : ' dim'), 'data-href': nodeHref(m, rack.id), 'data-drag': rack.id,
+      title: `${nodeLabel(rack)} — ${s.used}/${s.cap} positions filled · drag to move` },
+    h('div', { class: 'lbl' }, h('span', null, nodeLabel(rack))),
+    h('div', { class: 'tile-sub' }, s.cap ? Math.round(100 * frac(s)) + '% full' : 'empty'),
+    fillGauge(s), ownerBar(rack));
 }
-function looseCount(m, shelfId) { return m.loose.filter(i => (i.node_id || 0) === (shelfId || 0)).length; }
+function looseCount(m, nodeId) { return m.loose.filter(i => (i.node_id || 0) === (nodeId || 0)).length; }
+function spaceTile(m, sp) {
+  const list = m.loose.filter(i => i.node_id === sp.id);
+  const span = sp.span || 1;
+  const match = !state.highlight || ownerMatch(nodeOwner(m, sp.id)) || list.some(it => ownerMatch(itemOwner(m, it)));
+  // flex-grow = span: a 2-wide space always takes the room of two racks, at any window width.
+  return h('div', { class: 'rack-tile space-tile' + (match ? '' : ' dim'), 'data-href': nodeHref(m, sp.id), 'data-drag': sp.id,
+      style: { flex: `${span} 1 0` },
+      title: `${nodeLabel(sp)} — ${plural(list.length, 'loose item')} · ${span} rack-width${span > 1 ? 's' : ''} · drag to move` },
+    h('div', { class: 'lbl' }, h('span', null, nodeLabel(sp))),
+    h('div', { class: 'tile-sub' }, list.length ? plural(list.length, 'item') : 'empty'),
+    ownerBar(sp));
+}
+const shelfPiece = (m, n) => n.level === 'space' ? spaceTile(m, n) : rackTile(m, n);
+
+
 function cabinetView(m) {
   const shelves = kidsOf(m, null);
   const t = TYPES[m.unit.type];
@@ -554,46 +710,65 @@ function cabinetView(m) {
       shelves.length ? shelves.map(sh => {
         const racks = kidsOf(m, sh.id);
         const lc = looseCount(m, sh.id);
-        return h('div', { class: 'shelf' },
+        return h('div', { class: 'shelf', 'data-drop-parent': sh.id },
           h('div', { class: 'shelf-head' }, h('a', { href: nodeHref(m, sh.id) }, nodeLabel(sh)),
             ownerChip(sh.owner_id, sh.is_common, { short: true }), lc ? h('span', { class: 'pill' }, `${lc} loose`) : null),
-          racks.length ? h('div', { class: 'racks' }, racks.map(r => rackTile(m, r)))
-            : h('div', { class: 'faint small', style: { padding: '8px' } }, 'No racks — ', h('a', { href: nodeHref(m, sh.id) }, 'open shelf'), ' to add racks or loose items'));
+          racks.length ? h('div', { class: 'racks' }, racks.map(r => shelfPiece(m, r)))
+            : h('div', { class: 'racks empty-shelf' }, h('span', null, 'Empty shelf — ', h('a', { href: nodeHref(m, sh.id) }, 'open it'), ' to add racks or a loose space, or drop a rack here')));
       }) : h('div', { class: 'empty-note' }, 'No shelves yet — add one from the panel on the right.')));
 }
 function dewarView(m) {
   const shelves = kidsOf(m, null);
   if (!shelves.length) return h('div', { class: 'card empty-note' }, 'No tiers yet — add a shelf/tier from the panel on the right.');
   return h('div', { class: 'dewar-wrap' }, shelves.map(sh => {
-    const racks = kidsOf(m, sh.id);
-    const n = racks.length;
+    const pieces = kidsOf(m, sh.id);
+    // Each rack takes one slot round the tank; a loose space takes `span` consecutive slots.
+    const slots = [];
+    pieces.forEach(p => { for (let k = 0; k < (p.level === 'space' ? (p.span || 1) : 1); k++) slots.push(p); });
+    const n = slots.length;
     const C = 160, places = [];
+    function ring(i, count, R) { const a = -Math.PI / 2 + 2 * Math.PI * i / count; return [C + R * Math.cos(a), C + R * Math.sin(a), R * 2 * Math.sin(Math.PI / Math.max(count, 2))]; }
     if (n === 1) places.push([C, C, 0]);
-    else if (n <= 9) racks.forEach((_, i) => places.push(ring(i, n, n <= 4 ? 62 : 82)));
+    else if (n <= 9) slots.forEach((_, i) => places.push(ring(i, n, n <= 4 ? 62 : 82)));
     else {
       const inner = Math.min(7, Math.round(n / 3)), outer = n - inner;
       for (let i = 0; i < outer; i++) places.push(ring(i, outer, 100));
       for (let i = 0; i < inner; i++) places.push(ring(i, inner, 46));
     }
-    function ring(i, count, R) { const a = -Math.PI / 2 + 2 * Math.PI * i / count; return [C + R * Math.cos(a), C + R * Math.sin(a), R * 2 * Math.sin(Math.PI / Math.max(count, 2))]; }
     const size = Math.max(22, Math.min(58, ...places.map(p => p[2] ? p[2] * 0.78 : 80)));
-    const parts = racks.map((r, i) => {
-      const [x, y] = places[i];
+    const bySlot = new Map();
+    slots.forEach((p, i) => { if (!bySlot.has(p.id)) bySlot.set(p.id, []); bySlot.get(p.id).push(places[i]); });
+    const parts = pieces.map(r => {
+      const pl = bySlot.get(r.id) || [];
+      const [x, y] = pl[0] || [C, C];
+      const own = r.owner_id || r.is_common;
+      if (r.level === 'space') {
+        const cnt = looseCount(m, r.id);
+        const match = !state.highlight || ownerMatch(nodeOwner(m, r.id)) || m.loose.some(it => it.node_id === r.id && ownerMatch(itemOwner(m, it)));
+        const cx = pl.reduce((a, p) => a + p[0], 0) / pl.length, cy = pl.reduce((a, p) => a + p[1], 0) / pl.length;
+        return `<g class="rk space${match ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
+          <title>${esc(nodeLabel(r))} — ${cnt} loose item(s) · ${pl.length} slot(s) · drag to move</title>
+          ${pl.map(([px, py]) => `<rect x="${px - size / 2}" y="${py - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}"/>`).join('')}
+          <text class="long" x="${cx}" y="${cy - (size > 34 ? 5 : 0)}">${esc(r.name && !/^Loose space \d+$/.test(r.name) ? r.name.slice(0, 7) : 'Loose')}</text>
+          ${size > 34 ? `<text class="sub" x="${cx}" y="${cy + 9}">${cnt} item${cnt === 1 ? '' : 's'}</text>` : ''}
+        </g>`;
+      }
       const s = stats(m, r.id);
-      const lbl = r.name ? r.name.slice(0, 6) : String(r.index + 1);
-      return `<g class="rk${nodeMatches(m, r.id) ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}">
-        <title>${esc(nodeLabel(r))} — ${s.used}/${s.cap} filled${r.owner_id || r.is_common ? ' · ' + esc(ownerName(r.owner_id, r.is_common)) : ''}</title>
+      const lbl = r.name ? r.name.replace(/^Rack /, '').slice(0, 6) : String(r.index + 1);
+      return `<g class="rk${nodeMatches(m, r.id) ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
+        <title>${esc(nodeLabel(r))} — ${s.used}/${s.cap} filled${own ? ' · ' + esc(ownerName(r.owner_id, r.is_common)) : ''} · drag to move</title>
         <rect x="${x - size / 2}" y="${y - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}" style="fill:${fillColor(frac(s))}"/>
-        ${r.owner_id || r.is_common ? `<rect x="${x - size / 2 + 4}" y="${y + size / 2 - 7}" width="${size - 8}" height="3" rx="1.5" style="fill:${r.is_common ? 'var(--text-faint)' : userColor(r.owner_id)};stroke:none"/>` : ''}
-        <text x="${x}" y="${y - (size > 34 ? 5 : 0)}">${esc(lbl)}</text>
+        ${own ? `<rect x="${x - size / 2 + 4}" y="${y + size / 2 - 7}" width="${size - 8}" height="3" rx="1.5" style="fill:${r.is_common ? 'var(--text-faint)' : userColor(r.owner_id)};stroke:none"/>` : ''}
+        <text class="${lbl.length > 3 ? 'long' : ''}" x="${x}" y="${y - (size > 34 ? 5 : 0)}">${esc(lbl)}</text>
         ${size > 34 ? `<text class="sub" x="${x}" y="${y + 9}">${s.cap ? Math.round(100 * frac(s)) + '%' : '—'}</text>` : ''}
       </g>`;
     }).join('');
     const lc = looseCount(m, sh.id);
-    return h('div', { class: 'dewar', style: { flex: shelves.length > 1 ? '1 1 300px' : '1 1 100%' } },
+    const nr = pieces.filter(p => p.level === 'rack').length, ns = pieces.length - nr;
+    return h('div', { class: 'dewar', 'data-drop-parent': sh.id, style: { flex: shelves.length > 1 ? '1 1 300px' : '1 1 100%' } },
       h('div', { class: 'shelf-head' }, h('a', { href: nodeHref(m, sh.id) }, shelves.length > 1 ? nodeLabel(sh) : `${nodeLabel(sh)} (top view)`),
         ownerChip(sh.owner_id, sh.is_common, { short: true }), lc ? h('span', { class: 'pill' }, `${lc} loose`) : null,
-        h('span', { class: 'spacer' }), h('span', { class: 'faint' }, plural(n, 'rack'))),
+        h('span', { class: 'spacer' }), h('span', { class: 'faint' }, plural(nr, 'rack') + (ns ? ` · ${plural(ns, 'loose space')}` : ''))),
       h('div', { html: `<svg viewBox="0 0 320 320" role="img" aria-label="Top view of ${esc(m.unit.name)}">
         <circle class="wall" cx="160" cy="160" r="156"/><circle class="inner" cx="160" cy="160" r="142"/>
         <circle class="vapor" cx="160" cy="160" r="128"/>${parts}</svg>` }));
@@ -602,28 +777,17 @@ function dewarView(m) {
 function shelfView(m, shelf) {
   const racks = kidsOf(m, shelf.id);
   return h('div', null,
-    h('div', { class: 'cabinet' }, h('div', { class: 'cabinet-inner' },
-      racks.length ? h('div', { class: 'racks', style: { gap: '10px' } }, racks.map(r => {
-        const t = rackTile(m, r);
-        t.style.minWidth = '130px';
-        return t;
-      })) : h('div', { class: 'empty-note' }, 'No racks on this shelf. Add racks from the panel, or keep loose items here.'))));
+    h('div', { class: 'cabinet' }, h('div', { class: 'cabinet-inner' }, h('div', { class: 'shelf', 'data-drop-parent': shelf.id },
+      racks.length ? h('div', { class: 'racks big' }, racks.map(r => shelfPiece(m, r))) : h('div', { class: 'racks empty-shelf' }, 'No racks on this shelf. Add racks or a loose space from the panel, or keep loose items here.')))),
+    h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Drag racks and loose spaces to reorder them (long-press on a phone).'));
 }
 function boxTile(m, b, big = false) {
   const s = stats(m, b.id);
-  const items = m.byBox.get(b.id) || [];
-  const grid = new Map(items.map(it => [it.pos_row + ',' + it.pos_col, it]));
-  const wells = [];
-  const R = b.grid_rows, C = b.grid_cols;
-  for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
-    const it = grid.get(r + ',' + c);
-    wells.push(h('i', it ? { style: { background: catColor(it.category_id) } } : null));
-  }
-  const o = (b.owner_id || b.is_common) ? b : null;
-  return h('div', { class: 'box-tile' + (big ? ' big' : '') + (nodeMatches(m, b.id) ? '' : ' dim'), 'data-href': nodeHref(m, b.id), title: `${nodeLabel(b)} — ${s.used}/${s.cap}` },
-    h('div', { class: 'lbl' }, h('span', null, nodeLabel(b)), h('em', null, `${s.used}/${s.cap}`)),
-    h('div', { class: 'wells', style: { gridTemplateColumns: `repeat(${C}, 1fr)` } }, wells),
-    o ? h('div', { class: 'owner-bar', style: { background: o.is_common ? 'var(--text-faint)' : userColor(o.owner_id) }, title: ownerName(o.owner_id, o.is_common) }) : null);
+  return h('div', { class: 'box-tile' + (big ? ' big' : '') + (nodeMatches(m, b.id) ? '' : ' dim'), 'data-href': nodeHref(m, b.id),
+      title: `${nodeLabel(b)} — ${s.used}/${s.cap} positions filled (${b.grid_rows}×${b.grid_cols})` },
+    h('div', { class: 'lbl' }, h('span', null, nodeLabel(b))),
+    h('div', { class: 'tile-sub' }, `${s.used}/${s.cap}`),
+    fillGauge(s), ownerBar(b));
 }
 function rackView(m, rack) {
   const rowsN = kidsOf(m, rack.id);
@@ -743,8 +907,7 @@ function looseCard(m, shelf) {
   const list = m.loose.filter(i => shelf ? i.node_id === shelf.id : true);
   const where = it => {
     if (!it.node_id) return it.loose_where || '';
-    const n = m.nodes.get(it.node_id);
-    return [n ? nodeLabel(n) : '', it.loose_where].filter(Boolean).join(' · ');
+    return [chainOf(m, it.node_id).map(nodeLabel).join(' › '), it.loose_where].filter(Boolean).join(' · ');
   };
   return h('div', { class: 'card' },
     h('div', { class: 'card-head' }, h('h3', null, `Loose items (${list.length})`),
@@ -758,7 +921,7 @@ function looseCard(m, shelf) {
           it.quantity ? h('span', { class: 'muted' }, ' · ' + it.quantity) : null,
           h('div', { class: 'small faint' }, where(it))),
         ownerChip(o.owner_id, o.common, { short: true, inherit: o.from !== 'item' }));
-    })) : h('p', { class: 'small faint' }, shelf ? 'Nothing loose on this shelf.' : 'Items that are not in a box or rack (bags, bottles, flasks…) go here.'));
+    })) : h('p', { class: 'small faint' }, shelf ? `Nothing in this ${shelf.level === 'space' ? 'loose space' : 'shelf'} yet.` : 'Items that are not in a box or rack (bags, bottles, flasks…) go here.'));
 }
 async function moveLoose(m, shelf) {
   const mv = state.moving;
@@ -772,6 +935,7 @@ function nodeSide(m, node) {
   const form = h('form', { class: 'stack' },
     field('Name', inp('name', node.name, { placeholder: `${LEVEL[node.level]} ${node.index + 1}` }), 'optional'),
     field('Assigned to', ownerSelect(node.owner_id, node.is_common, inhLabel)),
+    node.level === 'space' ? field('Width', inp('span', node.span || 1, { type: 'number', min: 1, max: 30 }), 'how many rack spaces it takes up') : null,
     node.level === 'box' ? h('div', { class: 'grid2' },
       field('Rows', inp('grid_rows', node.grid_rows, { type: 'number', min: 1, max: 26 })),
       field('Columns', inp('grid_cols', node.grid_cols, { type: 'number', min: 1, max: 26 })),
@@ -783,22 +947,94 @@ function nodeSide(m, node) {
     const d = formData(form);
     const body = { name: d.name, notes: d.notes, ...ownerPayload(d.owner) };
     if (node.level === 'box') Object.assign(body, { grid_rows: +d.grid_rows, grid_cols: +d.grid_cols, label_style: d.label_style });
+    if (node.level === 'space') body.span = +d.span || 1;
     if (await attempt(() => api('PUT', `/api/nodes/${node.id}`, body), 'Saved')) refresh();
   };
   const s = stats(m, node.id);
   const child = CHILD[node.level];
   return [
     h('div', { class: 'card' },
-      h('div', { class: 'card-head' }, h('h3', null, LEVEL[node.level] + ' settings'), h('span', { class: 'small muted' }, `${s.used}/${s.cap} filled`)),
+      h('div', { class: 'card-head' }, h('h3', null, LEVEL[node.level] + ' settings'),
+        node.level === 'space' ? h('span', { class: 'small muted' }, plural(looseCount(m, node.id), 'item')) : h('span', { class: 'small muted' }, `${s.used}/${s.cap} filled`)),
       form),
-    node.level === 'shelf' ? looseCard(m, node) : null,
+    node.level === 'shelf' || node.level === 'space' ? looseCard(m, node) : null,
+    node.level === 'rack' || node.level === 'space' ? placeCard(m, node) : null,
     h('div', { class: 'card' },
       h('div', { class: 'row' },
         child ? h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, node) }, `+ Add ${LEVEL[child].toLowerCase()}s`) : null,
+        node.level === 'shelf' ? h('button', { class: 'btn sm', onclick: () => addSpaceDialog(m, node) }, '+ Add loose space') : null,
+        node.level === 'rack' ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, 'Replace with loose space') : null,
+        node.level === 'space' ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, 'Replace with rack') : null,
         node.level === 'box' ? h('a', { class: 'btn sm', href: `#/search?unit_id=${m.unit.id}&q=${encodeURIComponent('"' + chainOf(m, node.id).map(nodeLabel).join(' › ') + ' ›"')}` }, 'Search in box') : null,
         h('span', { class: 'spacer' }),
         h('button', { class: 'btn sm danger', onclick: () => deleteNode(m, node) }, `Delete ${LEVEL[node.level].toLowerCase()}`))),
   ];
+}
+/** Where a rack / loose space sits: move left/right or to another shelf (keyboard-friendly twin of drag & drop). */
+function placeCard(m, node) {
+  const sibs = kidsOf(m, node.parent_id);
+  const i = sibs.findIndex(x => x.id === node.id);
+  const shelves = kidsOf(m, null);
+  const shelfSel = h('select', { class: 'input' }, shelves.map(sh => h('option', { value: sh.id }, nodeLabel(sh))));
+  shelfSel.value = String(node.parent_id);
+  shelfSel.onchange = () => placeNode(m, node, +shelfSel.value, null);
+  return h('div', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h3', null, 'Position'), h('span', { class: 'small muted' }, `${i + 1} of ${sibs.length} on ${nodeLabel(m.nodes.get(node.parent_id))}`)),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn sm', disabled: i === 0, onclick: () => placeNode(m, node, node.parent_id, sibs[i - 1].id) }, '◀ Move left'),
+      h('button', { class: 'btn sm', disabled: i === sibs.length - 1, onclick: () => placeNode(m, node, node.parent_id, sibs[i + 2] ? sibs[i + 2].id : null) }, 'Move right ▶')),
+    shelves.length > 1 ? field('Shelf', shelfSel, 'moves it to the end of that shelf') : null,
+    h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Or drag it in the diagram (long-press on a phone).'));
+}
+async function placeNode(m, node, parentId, beforeId) {
+  const r = await attempt(() => api('POST', `/api/nodes/${node.id}/place`, { parent_id: parentId, before_id: beforeId }));
+  if (!r) return refresh();
+  toast(r.renamed ? `Moved — renamed to “${r.renamed}” (name was taken on that shelf)` : 'Moved');
+  refresh();
+}
+function addSpaceDialog(m, shelf) {
+  const err = h('p', { class: 'error' });
+  const form = h('form', { class: 'stack' },
+    h('p', { class: 'small muted' }, 'A loose space is room on the shelf for things that are not in racks or boxes: bottles, bags, flasks, bulky kits.'),
+    h('div', { class: 'grid2' },
+      field('Width', inp('span', 1, { type: 'number', min: 1, max: 30 }), 'in rack spaces'),
+      field('Name', inp('name', '', { placeholder: 'optional, e.g. Media bottles' }))), err);
+  const go = async () => {
+    const v = formData(form);
+    try { await api('POST', `/api/units/${m.unit.id}/nodes`, { parent_id: shelf.id, level: 'space', span: +v.span || 1, name: v.name }); close(); toast('Loose space added'); refresh(); }
+    catch (x) { err.textContent = x.message; }
+  };
+  form.onsubmit = e => { e.preventDefault(); go(); };
+  const close = openModal({ title: `Add loose space to ${nodeLabel(shelf)}`, body: form,
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Add')] });
+}
+async function convertNode(m, node) {
+  if (node.level === 'rack') {
+    const s = stats(m, node.id);
+    if (s.used) { toast(`${nodeLabel(node)} still holds ${plural(s.used, 'item')} — move or remove them first.`, true); return; }
+    const ok = await confirmBox(`Replace ${nodeLabel(node)} with a loose space?`,
+      `The empty rack (with its ${plural(kidsOf(m, node.id).length, 'row')} and boxes) is removed and a loose-item space takes its place on the shelf. You can widen the space afterwards, or turn it back into a rack.`,
+      { okText: 'Replace with loose space' });
+    if (ok && await attempt(() => api('POST', `/api/nodes/${node.id}/convert`), 'Now a loose space')) refresh();
+    return;
+  }
+  if (looseCount(m, node.id)) { toast(`${nodeLabel(node)} still holds ${plural(looseCount(m, node.id), 'item')} — move or remove them first.`, true); return; }
+  // Space → rack: ask for the rack's insides, defaulting to its neighbours' layout.
+  const rackSib = kidsOf(m, node.parent_id).find(x => x.level === 'rack');
+  const d = guessLayout(m, node.parent_id, 'rack');
+  if (!rackSib) Object.assign(d, TYPES[m.unit.type].layout);
+  const err = h('p', { class: 'error' });
+  const form = h('form', { class: 'stack' },
+    h('div', { class: 'grid2' }, layoutFieldsBelow('shelf', d)), gridFields(d), err);
+  const go = async () => {
+    const v = formData(form);
+    const layout = { rows: +v.rows, boxes: +v.boxes, grid_rows: +v.grid_rows, grid_cols: +v.grid_cols, label_style: v.label_style };
+    try { await api('POST', `/api/nodes/${node.id}/convert`, { layout }); close(); toast('Now a rack'); refresh(); }
+    catch (x) { err.textContent = x.message; }
+  };
+  form.onsubmit = e => { e.preventDefault(); go(); };
+  const close = openModal({ title: `Replace ${nodeLabel(node)} with a rack`, body: form,
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Replace with rack')] });
 }
 function layoutFieldsBelow(level, defaults) {
   // inputs for the levels strictly below `level` (null = unit → everything below shelf)
@@ -815,7 +1051,7 @@ function layoutFieldsBelow(level, defaults) {
 }
 function guessLayout(m, parentId, level) {
   // Copy structure from an existing sibling so "add rack" makes racks like the others.
-  const sib = kidsOf(m, parentId)[0];
+  const sib = kidsOf(m, parentId).find(x => x.level === level);
   const d = { racks: 4, rows: 4, boxes: 4, grid_rows: 9, grid_cols: 9, ...TYPES[m.unit.type].layout };
   let n = sib;
   let lvl = level;
@@ -1036,7 +1272,8 @@ function openItemForm(opts) {
   let whereSel = null;
   if (opts.loose && m) {
     whereSel = h('select', { class: 'input', name: '_where' }, h('option', { value: '' }, `${m.unit.name} (general)`),
-      kidsOf(m, null).map(s => h('option', { value: s.id }, nodeLabel(s))));
+      kidsOf(m, null).map(s => [h('option', { value: s.id }, nodeLabel(s)),
+        kidsOf(m, s.id).filter(x => x.level === 'space').map(sp => h('option', { value: sp.id }, `${nodeLabel(s)} › ${nodeLabel(sp)}`))]));
     whereSel.value = opts.shelf ? String(opts.shelf.id) : '';
   }
   const fillIn = opts.allowFill ? inp('_fill', 1, { type: 'number', min: 1, max: box.grid_rows * box.grid_cols }) : null;
