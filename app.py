@@ -31,13 +31,20 @@ MAX_BODY = 4 * 1024 * 1024
 UNIT_TYPES = ("ln2", "-80", "-20", "+4")
 UNIT_TYPE_LABEL = {"ln2": "Liquid nitrogen", "-80": "−80 °C freezer",
                    "-20": "−20 °C freezer", "+4": "+4 °C fridge"}
-LEVELS = ("shelf", "rack", "row", "box")
+LEVELS = ("shelf", "rack", "row", "box")          # freezers and fridges
+# Each storage type has its own chain of levels. LN2 tanks have no shelves or rows:
+# racks stand straight in the tank and hold a vertical stack of boxes.
+CHAINS = {"ln2": ("rack", "box")}
+
+
+def chain_for(unit_type):
+    return CHAINS.get(unit_type, LEVELS)
 LEVEL_LABEL = {"shelf": "Shelf", "rack": "Rack", "row": "Row", "box": "Box", "space": "Loose space"}
 SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 5
+API_VERSION = 6
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -227,17 +234,24 @@ def subtree_ids(conn, node_id):
         SELECT id FROM t""", (node_id,))]
 
 
-def next_level(level):
-    i = LEVELS.index(level)
-    return LEVELS[i + 1] if i + 1 < len(LEVELS) else None
+def next_level(level, chain=LEVELS):
+    if level not in chain:
+        return None
+    i = chain.index(level)
+    return chain[i + 1] if i + 1 < len(chain) else None
 
 
-def clean_layout(layout, from_level):
+def unit_chain(conn, unit_id):
+    r = conn.execute("SELECT type FROM units WHERE id = ?", (unit_id,)).fetchone()
+    return chain_for(r[0] if r else None)
+
+
+def clean_layout(layout, from_level, chain=LEVELS):
     """Validate the per-level counts needed below (and including) from_level."""
     out = {}
-    start = LEVELS.index(from_level)
+    start = chain.index(from_level)
     boxes_total = 1
-    for lvl in LEVELS[start:]:
+    for lvl in chain[start:]:
         key = LAYOUT_KEYS[lvl]
         out[key] = as_int(layout.get(key), key.capitalize(), 0 if lvl != from_level else 1,
                           LAYOUT_MAX[key], allow_none=False)
@@ -250,7 +264,7 @@ def clean_layout(layout, from_level):
     return out
 
 
-def build_nodes(conn, unit_id, parent_id, level, count, layout, start_pos=0):
+def build_nodes(conn, unit_id, parent_id, level, count, layout, start_pos=0, chain=LEVELS):
     created = []
     for i in range(count):
         is_box = level == "box"
@@ -262,9 +276,9 @@ def build_nodes(conn, unit_id, parent_id, level, count, layout, start_pos=0):
              layout["grid_cols"] if is_box else None,
              layout["label_style"] if is_box else "grid"))
         created.append(cur.lastrowid)
-        child = next_level(level)
+        child = next_level(level, chain)
         if child and layout.get(LAYOUT_KEYS[child]):
-            build_nodes(conn, unit_id, cur.lastrowid, child, layout[LAYOUT_KEYS[child]], layout)
+            build_nodes(conn, unit_id, cur.lastrowid, child, layout[LAYOUT_KEYS[child]], layout, 0, chain)
     return created
 
 
@@ -596,7 +610,8 @@ def list_units(ctx):
 def create_unit(ctx):
     conn, b = ctx["conn"], ctx["body"]
     f = _unit_fields(conn, b)
-    layout = clean_layout(b.get("layout") or {}, "shelf")
+    chain = chain_for(f["type"])
+    layout = clean_layout(b.get("layout") or {}, chain[0], chain)
     plan = clean_plan(b.get("plan")) if f["type"] == "ln2" else None
     if plan and layout["racks"] != len(plan["slots"]):
         plan = None   # the arrangement only applies when every slot gets exactly one rack
@@ -604,12 +619,11 @@ def create_unit(ctx):
     cur = conn.execute(f"INSERT INTO units ({', '.join(f)}) VALUES ({', '.join('?' * len(f))})",
                        tuple(f.values()))
     uid = cur.lastrowid
-    build_nodes(conn, uid, None, "shelf", layout["shelves"], layout)
+    build_nodes(conn, uid, None, chain[0], layout[LAYOUT_KEYS[chain[0]]], layout, 0, chain)
     if plan:   # racks take the slot names (A1, A2, …) in slot order
-        for shelf_id, in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND level = 'shelf'", (uid,)).fetchall():
-            racks = conn.execute("SELECT id FROM nodes WHERE parent_id = ? ORDER BY position, id", (shelf_id,)).fetchall()
-            for i, (rid,) in enumerate(racks):
-                conn.execute("UPDATE nodes SET name = ?, position = ? WHERE id = ?", (plan["slots"][i]["name"] or None, i, rid))
+        racks = conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS NULL ORDER BY position, id", (uid,)).fetchall()
+        for i, (rid,) in enumerate(racks):
+            conn.execute("UPDATE nodes SET name = ?, position = ? WHERE id = ?", (plan["slots"][i]["name"] or None, i, rid))
     log(ctx, "unit.add", f"Added {UNIT_TYPE_LABEL[f['type']]} “{f['name']}”", unit_id=uid)
     conn.commit()
     return {"id": uid}
@@ -669,15 +683,12 @@ def delete_unit(ctx):
     return {"ok": True}
 
 
-def _free_slots(conn, uid, shelf_id):
-    """Empty slot indexes on a shelf of an arranged tank ([] if not arranged)."""
+def _free_slots(conn, uid, holder_id):
+    """Empty slot indexes in an arranged tank ([] if not arranged). Tank racks stand at the root."""
     plan = unit_plan(conn, uid)
-    if not plan or not shelf_id:
+    if not plan or holder_id is not None:
         return []
-    lvl = conn.execute("SELECT level FROM nodes WHERE id = ?", (shelf_id,)).fetchone()
-    if not lvl or lvl[0] != "shelf":
-        return []
-    used = {r[0] for r in conn.execute("SELECT position FROM nodes WHERE parent_id = ?", (shelf_id,))}
+    used = {r[0] for r in conn.execute("SELECT position FROM nodes WHERE unit_id = ? AND parent_id IS NULL", (uid,))}
     return [i for i in range(len(plan["slots"])) if i not in used]
 
 
@@ -702,17 +713,20 @@ def add_nodes(ctx):
     conn, b = ctx["conn"], ctx["body"]
     uid = as_int(ctx["params"]["id"], "id")
     require(conn.execute("SELECT 1 FROM units WHERE id = ?", (uid,)).fetchone(), "Not found", 404)
-    parent_id = as_int(b.get("parent_id"), "parent")
+    chain = unit_chain(conn, uid)
+    parent_id = as_int(b.get("parent_id"), "parent") or None
     parent = None
     if parent_id:
         parent = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ?", (parent_id, uid)))
         require(parent, "Parent not found", 404)
-        level = next_level(parent["level"]) if parent["level"] != "space" else None
+        level = next_level(parent["level"], chain)
         require(level, "That can't contain other containers")
     else:
-        level = "shelf"
+        level = chain[0]
     if b.get("level") == "space":
-        require(parent and parent["level"] == "shelf", "Loose spaces go on a shelf")
+        # Loose spaces sit beside racks: on a shelf, or straight in an LN2 tank.
+        require((parent and parent["level"] == "shelf") or (not parent and chain[0] == "rack"),
+                "Loose spaces go on a shelf (or straight in a tank)")
         span = as_int(b.get("span") or 1, "Width", 1, MAX_SPAN)
         start = _next_pos(conn, uid, parent_id)
         cur = conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, span, name) VALUES (?,?,?,?,?,?)",
@@ -721,10 +735,10 @@ def add_nodes(ctx):
         conn.commit()
         return {"ids": [cur.lastrowid]}
     count = as_int(b.get("count") or 1, "Count", 1, LAYOUT_MAX[LAYOUT_KEYS[level]])
-    layout = clean_layout({**(b.get("layout") or {}), LAYOUT_KEYS[level]: count}, level)
+    layout = clean_layout({**(b.get("layout") or {}), LAYOUT_KEYS[level]: count}, level, chain)
     total = conn.execute("SELECT COUNT(*) FROM nodes WHERE unit_id=? AND level='box'", (uid,)).fetchone()[0]
     per = 1
-    for lvl in LEVELS[LEVELS.index(level):]:
+    for lvl in chain[chain.index(level):]:
         per *= layout[LAYOUT_KEYS[lvl]]
     require(total + per <= MAX_BOXES_PER_UNIT, f"That would exceed {MAX_BOXES_PER_UNIT} boxes in this unit")
     if _free_slots(conn, uid, parent_id):
@@ -733,14 +747,15 @@ def add_nodes(ctx):
         plan = unit_plan(conn, uid)
         for _ in range(count):
             pos = _next_pos(conn, uid, parent_id)
-            ids += build_nodes(conn, uid, parent_id, level, 1, layout, pos)
-            # Name it after its slot ("C3") unless another rack on this shelf already has that name.
+            ids += build_nodes(conn, uid, parent_id, level, 1, layout, pos, chain)
+            # Name it after its slot ("C3") unless another rack in the tank already has that name.
             slot_name = plan["slots"][pos]["name"] if pos < len(plan["slots"]) else None
-            taken = conn.execute("SELECT 1 FROM nodes WHERE parent_id = ? AND name = ?", (parent_id, slot_name)).fetchone()
+            taken = conn.execute("SELECT 1 FROM nodes WHERE unit_id = ? AND parent_id IS ? AND name = ?",
+                                 (uid, parent_id, slot_name)).fetchone()
             conn.execute("UPDATE nodes SET name = ? WHERE id = ?",
-                         (slot_name if slot_name and not taken else _free_name(conn, parent_id, "Rack", ids[-1]), ids[-1]))
+                         (slot_name if slot_name and not taken else _free_name(conn, uid, parent_id, "Rack", ids[-1]), ids[-1]))
     else:
-        ids = build_nodes(conn, uid, parent_id, level, count, layout, _next_pos(conn, uid, parent_id))
+        ids = build_nodes(conn, uid, parent_id, level, count, layout, _next_pos(conn, uid, parent_id), chain)
     log(ctx, "node.add", f"Added {count} {LEVEL_LABEL[level].lower()}{'s' if count > 1 else ''}", unit_id=uid)
     conn.commit()
     return {"ids": ids}
@@ -804,10 +819,11 @@ def _freeze_labels(conn, tree, parent_ids):
             conn.execute("UPDATE nodes SET name = ? WHERE id = ?", (tree.label(n), n["id"]))
 
 
-def _free_name(conn, shelf_id, base, exclude_id):
-    """'Rack 4' / 'Loose space 2' — the first '<base> N' not used by another piece on this shelf."""
+def _free_name(conn, unit_id, holder_id, base, exclude_id):
+    """'Rack 4' / 'Loose space 2' — the first '<base> N' not used by another piece in this holder."""
     taken = {r[0] for r in conn.execute(
-        "SELECT name FROM nodes WHERE parent_id = ? AND id != ? AND name IS NOT NULL", (shelf_id, exclude_id))}
+        "SELECT name FROM nodes WHERE unit_id = ? AND parent_id IS ? AND id != ? AND name IS NOT NULL",
+        (unit_id, holder_id, exclude_id))}
     base = re.sub(r"\s*\d+$", "", base).strip() or "Rack"
     i = 1
     while f"{base} {i}" in taken:
@@ -834,18 +850,52 @@ def convert_node(ctx):
     if n["level"] == "rack":
         conn.execute("DELETE FROM nodes WHERE parent_id = ?", (nid,))   # rows → boxes cascade
         name = n["name"] if n["name"] and not re.fullmatch(r"Rack \d+", n["name"]) else None
-        name = name or _free_name(conn, n["parent_id"], "Loose space", nid)
+        name = name or _free_name(conn, n["unit_id"], n["parent_id"], "Loose space", nid)
         conn.execute("UPDATE nodes SET level='space', span=1, name=? WHERE id=?", (name, nid))
         log(ctx, "node.convert", f"Replaced {old_label} with a loose space", unit_id=n["unit_id"])
     else:
-        layout = clean_layout(b.get("layout") or {}, "row")
+        chain = unit_chain(conn, n["unit_id"])
+        inner = next_level("rack", chain)          # rows in a freezer, boxes in a tank
+        layout = clean_layout(b.get("layout") or {}, inner, chain)
         name = n["name"] if n["name"] and not re.fullmatch(r"Loose space \d+", n["name"]) else None
-        name = name or _free_name(conn, n["parent_id"], "Rack", nid)
+        name = name or _free_name(conn, n["unit_id"], n["parent_id"], "Rack", nid)
         conn.execute("UPDATE nodes SET level='rack', span=1, name=? WHERE id=?", (name, nid))
-        build_nodes(conn, n["unit_id"], nid, "row", layout["rows"], layout)
+        build_nodes(conn, n["unit_id"], nid, inner, layout[LAYOUT_KEYS[inner]], layout, 0, chain)
         log(ctx, "node.convert", f"Replaced {old_label} with a rack", unit_id=n["unit_id"])
     conn.commit()
     return {"ok": True}
+
+
+@route("POST", "/api/nodes/<id>/merge")
+def merge_spaces(ctx):
+    """Merge two neighbouring loose spaces: {with_id}. The left one stays, its width becomes the sum,
+    and the other one's items move into it."""
+    conn, b = ctx["conn"], ctx["body"]
+    nid = as_int(ctx["params"]["id"], "id")
+    oid = as_int(b.get("with_id"), "Other space", allow_none=False)
+    n = one(conn.execute("SELECT * FROM nodes WHERE id = ?", (nid,)))
+    o = one(conn.execute("SELECT * FROM nodes WHERE id = ?", (oid,)))
+    require(n and o and n["level"] == "space" and o["level"] == "space" and nid != oid, "Pick two loose spaces")
+    require(n["unit_id"] == o["unit_id"] and n["parent_id"] == o["parent_id"], "Only spaces side by side can be merged")
+    require(not (n["parent_id"] is None and unit_plan(conn, n["unit_id"])),
+            "Racks in this tank sit in fixed slots, so its loose spaces can't be merged")
+    sibs = [r[0] for r in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS ? ORDER BY position, id",
+                                       (n["unit_id"], n["parent_id"]))]
+    i, j = sibs.index(nid), sibs.index(oid)
+    require(abs(i - j) == 1, "Only spaces right next to each other can be merged")
+    keep, gone = (n, o) if i < j else (o, n)
+    tree = Tree(conn, n["unit_id"])
+    _freeze_labels(conn, tree, {n["parent_id"]})          # neighbours keep their names
+    keep_label, gone_label = tree.label(tree.nodes[keep["id"]]), tree.label(tree.nodes[gone["id"]])
+    moved = conn.execute("UPDATE items SET node_id = ? WHERE node_id = ?", (keep["id"], gone["id"])).rowcount
+    notes = "\n".join(x for x in (keep["notes"], gone["notes"]) if x) or None
+    conn.execute("UPDATE nodes SET span = ?, notes = ?, name = ? WHERE id = ?",
+                 (min((keep["span"] or 1) + (gone["span"] or 1), MAX_SPAN), notes, keep_label, keep["id"]))
+    conn.execute("DELETE FROM nodes WHERE id = ?", (gone["id"],))
+    log(ctx, "node.merge", f"Merged {gone_label} into {keep_label}" + (f" ({moved} item(s) moved)" if moved else ""),
+        unit_id=n["unit_id"])
+    conn.commit()
+    return {"ok": True, "id": keep["id"]}
 
 
 @route("POST", "/api/nodes/<id>/place")
@@ -856,23 +906,33 @@ def place_node(ctx):
     nid = as_int(ctx["params"]["id"], "id")
     n = one(conn.execute("SELECT * FROM nodes WHERE id = ?", (nid,)))
     require(n and (n["level"] in SHELF_CHILDREN or n["level"] == "box"), "Only racks, loose spaces and boxes can be moved")
-    parent_level = "row" if n["level"] == "box" else "shelf"
-    shelf_id = as_int(b.get("parent_id"), parent_level.capitalize(), allow_none=False)
-    shelf = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ? AND level = ?",
-                             (shelf_id, n["unit_id"], parent_level)))
-    require(shelf, "Boxes can only go into a row of the same storage unit" if parent_level == "row"
-            else "Racks can only go on a shelf of the same storage unit")
+    chain = unit_chain(conn, n["unit_id"])
+    # What holds this piece: boxes sit in a row (freezer) or a rack (tank); racks and loose spaces
+    # sit on a shelf (freezer) or straight in the tank (None = the unit itself).
+    if n["level"] == "box":
+        parent_level = chain[chain.index("box") - 1]
+    else:
+        parent_level = "shelf" if "shelf" in chain else None
+    if parent_level:
+        shelf_id = as_int(b.get("parent_id"), parent_level.capitalize(), allow_none=False)
+        shelf = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ? AND level = ?",
+                                 (shelf_id, n["unit_id"], parent_level)))
+        require(shelf, f"That can only go into a {parent_level} of the same storage unit")
+    else:
+        shelf_id = None
     before = as_int(b.get("before_id"), "before")
     tree = Tree(conn, n["unit_id"])
+    holder_label = lambda hid: tree.label(tree.nodes[hid]) if hid else tree.units[n["unit_id"]]["name"]
     _freeze_labels(conn, tree, {n["parent_id"], shelf_id})
-    plan = unit_plan(conn, n["unit_id"]) if parent_level == "shelf" else None
+    plan = unit_plan(conn, n["unit_id"]) if parent_level is None and n["level"] != "box" else None
     if plan:
         # Arranged tank: racks sit in fixed slots, so a drop swaps two racks or fills an empty slot.
         label = tree.label(tree.nodes[nid])
         swap = as_int(b.get("swap_with"), "swap")
         if swap is not None:
-            other = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND parent_id = ?", (swap, shelf_id)))
-            require(other and other["id"] != nid, "That rack isn't on this shelf")
+            other = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ? AND parent_id IS ?",
+                                     (swap, n["unit_id"], shelf_id)))
+            require(other and other["id"] != nid, "That rack isn't in this tank")
             conn.execute("UPDATE nodes SET parent_id = ?, position = ? WHERE id = ?", (n["parent_id"], n["position"], swap))
             conn.execute("UPDATE nodes SET parent_id = ?, position = ? WHERE id = ?", (shelf_id, other["position"], nid))
             log(ctx, "node.move", f"Swapped {label} and {tree.label(tree.nodes[swap])}", unit_id=n["unit_id"])
@@ -883,17 +943,18 @@ def place_node(ctx):
                 require(free, "No empty slot there — drop it onto a rack to swap them")
                 slot = free[0]
             require(0 <= slot < len(plan["slots"]), "No such slot")
-            taken = conn.execute("SELECT 1 FROM nodes WHERE parent_id = ? AND position = ? AND id != ?",
-                                 (shelf_id, slot, nid)).fetchone()
+            taken = conn.execute("SELECT 1 FROM nodes WHERE unit_id = ? AND parent_id IS ? AND position = ? AND id != ?",
+                                 (n["unit_id"], shelf_id, slot, nid)).fetchone()
             require(not taken, "That slot is taken — drop onto the rack to swap them")
             conn.execute("UPDATE nodes SET parent_id = ?, position = ? WHERE id = ?", (shelf_id, slot, nid))
             log(ctx, "node.move", f"Moved {label} to slot {plan['slots'][slot]['name'] or slot + 1}", unit_id=n["unit_id"])
         conn.commit()
         return {"ok": True, "renamed": None}
     sibs = [r[0] for r in conn.execute(
-        "SELECT id FROM nodes WHERE parent_id = ? AND id != ? ORDER BY position, id", (shelf_id, nid))]
+        "SELECT id FROM nodes WHERE unit_id = ? AND parent_id IS ? AND id != ? ORDER BY position, id",
+        (n["unit_id"], shelf_id, nid))]
     if before is not None:
-        require(before in sibs, "Drop target isn't on that shelf")
+        require(before in sibs, "Drop target isn't there")
         sibs.insert(sibs.index(before), nid)
     else:
         sibs.append(nid)
@@ -903,15 +964,15 @@ def place_node(ctx):
     label = tree.label(tree.nodes[nid])
     renamed = None
     if shelf_id != n["parent_id"]:
-        dup = conn.execute("SELECT 1 FROM nodes WHERE parent_id = ? AND id != ? AND name = ?",
-                           (shelf_id, nid, label)).fetchone()
+        dup = conn.execute("SELECT 1 FROM nodes WHERE unit_id = ? AND parent_id IS ? AND id != ? AND name = ?",
+                           (n["unit_id"], shelf_id, nid, label)).fetchone()
         if dup:   # e.g. "Rack 1" dropped on a shelf that already has a "Rack 1"
-            renamed = _free_name(conn, shelf_id, label, nid)
+            renamed = _free_name(conn, n["unit_id"], shelf_id, label, nid)
             conn.execute("UPDATE nodes SET name = ? WHERE id = ?", (renamed, nid))
-        log(ctx, "node.move", f"Moved {label} from {tree.label(tree.nodes[n['parent_id']])} to {tree.label(tree.nodes[shelf_id])}",
+        log(ctx, "node.move", f"Moved {label} from {holder_label(n['parent_id'])} to {holder_label(shelf_id)}",
             unit_id=n["unit_id"])
     else:
-        log(ctx, "node.move", f"Reordered {label} on {tree.label(tree.nodes[shelf_id])}", unit_id=n["unit_id"])
+        log(ctx, "node.move", f"Reordered {label} in {holder_label(shelf_id)}", unit_id=n["unit_id"])
     if renamed:
         log(ctx, "node.edit", f"Renamed {label} to {renamed} (that name was taken on the new shelf)", unit_id=n["unit_id"])
     conn.commit()
@@ -947,22 +1008,16 @@ def create_preset(ctx):
     kids = defaultdict(list)
     for nd in sorted(tree.nodes.values(), key=lambda x: (x["position"], x["id"])):
         kids[nd["parent_id"]].append(nd)
-    # Describe the layout from the first shelf / rack / row / box (presets are uniform).
-    layout = {"shelves": len([x for x in kids[None] if x["level"] == "shelf"]), "racks": 0, "rows": 0, "boxes": 0,
-              "grid_rows": 9, "grid_cols": 9, "label_style": "grid"}
-    node = (kids[None] or [None])[0]
-    if node:
-        racks = [x for x in kids[node["id"]] if x["level"] == "rack"]
-        layout["racks"] = len(racks)
-        node = racks[0] if racks else None
-    if node:
-        layout["rows"] = len(kids[node["id"]])
-        node = (kids[node["id"]] or [None])[0]
-    if node:
-        layout["boxes"] = len(kids[node["id"]])
-        node = (kids[node["id"]] or [None])[0]
-    if node:
-        layout.update(grid_rows=node["grid_rows"], grid_cols=node["grid_cols"], label_style=node["label_style"])
+    # Describe the layout from the first item at each level (presets are uniform).
+    chain = chain_for(u["type"])
+    layout = {"grid_rows": 9, "grid_cols": 9, "label_style": "grid"}
+    holder = None
+    for lvl in chain:
+        here = [x for x in kids[holder] if x["level"] == lvl] if holder is not False else []
+        layout[LAYOUT_KEYS[lvl]] = len(here)
+        holder = here[0]["id"] if here else False
+        if lvl == "box" and here:
+            layout.update(grid_rows=here[0]["grid_rows"], grid_cols=here[0]["grid_cols"], label_style=here[0]["label_style"])
     cur = conn.execute(
         "INSERT INTO presets (name, type, manufacturer, device_name, model, size, layout, plan) VALUES (?,?,?,?,?,?,?,?)",
         (name, u["type"], u["manufacturer"], u["device_name"], u["model"], u["size"], json.dumps(layout), u["plan"]))
@@ -982,7 +1037,8 @@ def update_preset(ctx):
     if "name" in sets:
         require(sets["name"], "Name is required")
     if "layout" in b:
-        sets["layout"] = json.dumps(clean_layout(b["layout"] or {}, "shelf"))
+        chain = chain_for(conn.execute("SELECT type FROM presets WHERE id = ?", (pid,)).fetchone()[0])
+        sets["layout"] = json.dumps(clean_layout(b["layout"] or {}, chain[0], chain))
     if sets:
         conn.execute(f"UPDATE presets SET {', '.join(k + ' = ?' for k in sets)} WHERE id = ?", (*sets.values(), pid))
     conn.commit()

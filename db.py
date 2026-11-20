@@ -199,13 +199,51 @@ BUILTIN_PRESETS = [
         "manufacturer": "Thermo Fisher Scientific Inc (ECRI™)",
         "device_name": "CryoExtra",
         "model": "CE8120",
-        # 4 compartments × 3 racks. Rack contents are a starting guess — adjust to your racks.
-        "layout": {"shelves": 1, "racks": 12, "rows": 12, "boxes": 1, "grid_rows": 9, "grid_cols": 9,
-                   "label_style": "grid"},
+        # 4 compartments × 3 racks; each rack is a vertical stack of boxes.
+        # Boxes per rack is a starting guess — adjust to your racks.
+        "layout": {"racks": 12, "boxes": 12, "grid_rows": 9, "grid_cols": 9, "label_style": "grid"},
         "plan": CE8120_PLAN,
         "notes": "Four compartments (A–D), three racks each.",
     },
 ]
+
+
+def _flatten_ln2(conn):
+    """LN2 tanks have no shelves or rows: racks stand in the tank, boxes stack in the rack.
+    Converts tanks made by older versions (shelf › rack › row › box). Safe to run every start."""
+    for (uid,) in conn.execute("SELECT id FROM units WHERE type = 'ln2'").fetchall():
+        shelves = conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND level = 'shelf' ORDER BY position, id",
+                               (uid,)).fetchall()
+        has_rows = conn.execute("SELECT 1 FROM nodes WHERE unit_id = ? AND level = 'row'", (uid,)).fetchone()
+        if not shelves and not has_rows:
+            continue
+        pos = conn.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM nodes WHERE unit_id = ? AND parent_id IS NULL"
+                           " AND level != 'shelf'", (uid,)).fetchone()[0]
+        for (sid,) in shelves:
+            pieces = conn.execute("SELECT id, position FROM nodes WHERE parent_id = ? ORDER BY position, id", (sid,)).fetchall()
+            for pid, ppos in pieces:
+                # A single tier keeps its positions (arranged tanks' slots); several tiers are laid end to end.
+                conn.execute("UPDATE nodes SET parent_id = NULL, position = ? WHERE id = ?",
+                             (ppos if len(shelves) == 1 else pos, pid))
+                pos += 1
+            conn.execute("UPDATE items SET node_id = NULL WHERE node_id = ?", (sid,))   # loose on a tier → in the tank
+            conn.execute("DELETE FROM nodes WHERE id = ?", (sid,))
+        for (rid,) in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND level = 'rack'", (uid,)).fetchall():
+            bpos = 0
+            for (row_id,) in conn.execute("SELECT id FROM nodes WHERE parent_id = ? AND level = 'row' ORDER BY position, id",
+                                          (rid,)).fetchall():
+                for (bid,) in conn.execute("SELECT id FROM nodes WHERE parent_id = ? ORDER BY position, id", (row_id,)).fetchall():
+                    conn.execute("UPDATE nodes SET parent_id = ?, position = ? WHERE id = ?", (rid, bpos, bid))
+                    bpos += 1
+                conn.execute("DELETE FROM nodes WHERE id = ?", (row_id,))
+    # LN2 presets: {shelves, racks, rows, boxes} → {racks, boxes per rack}
+    for pid, layout in conn.execute("SELECT id, layout FROM presets WHERE type = 'ln2'").fetchall():
+        L = json.loads(layout)
+        if "rows" in L or "shelves" in L:
+            new = {"racks": L.get("racks", 1) * max(L.get("shelves", 1), 1),
+                   "boxes": max(L.get("rows", 1), 1) * max(L.get("boxes", 1), 1)}
+            new.update({k: L[k] for k in ("grid_rows", "grid_cols", "label_style") if k in L})
+            conn.execute("UPDATE presets SET layout = ? WHERE id = ?", (json.dumps(new), pid))
 
 
 def init_db():
@@ -228,6 +266,7 @@ def init_db():
                 (p["name"], p["type"], p["manufacturer"], p["device_name"], p["model"], p.get("size"),
                  json.dumps(p["layout"]), json.dumps(p["plan"]) if p.get("plan") else None, p.get("notes")))
         conn.execute("INSERT INTO settings (key, value) VALUES ('presets_seeded', '1')")
+    _flatten_ln2(conn)
     # Labs set up before lab codes existed get one now (an admin can change it in Settings).
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] and \
             not conn.execute("SELECT 1 FROM settings WHERE key = 'join_code'").fetchone():

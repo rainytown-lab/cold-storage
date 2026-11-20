@@ -6,7 +6,7 @@
 // ------------------------------------------------------------------------ //
 const TYPES = {
   'ln2': { label: 'Liquid nitrogen', short: 'LN₂', temp: '−196 °C', cls: 't-ln2',
-           layout: { shelves: 1, racks: 6, rows: 12, boxes: 1, grid_rows: 9, grid_cols: 9 },
+           layout: { racks: 6, boxes: 12, grid_rows: 9, grid_cols: 9 },
            sizes: ['Dewar, 35 L', 'Tank, 240 L', 'Tank, 500 L', 'Tank, 800 L'] },
   '-80': { label: '−80 °C freezer', short: '−80', temp: '−80 °C', cls: 't-80',
            layout: { shelves: 5, racks: 4, rows: 4, boxes: 4, grid_rows: 9, grid_cols: 9 },
@@ -19,10 +19,22 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 5;   // must match API_VERSION in app.py
+const API_VERSION = 6;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
-const CHILD = { shelf: 'rack', rack: 'row', row: 'box', box: null, space: null };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
+// Levels per storage type. LN2 tanks have no shelves or rows: racks stand in the tank and
+// hold a vertical stack of boxes.
+const CHAINS = { ln2: ['rack', 'box'] };
+const chainFor = type => CHAINS[type] || ['shelf', 'rack', 'row', 'box'];
+/** The level below `level` for this type (`null` = the unit itself). */
+function childLevel(type, level) {
+  const c = chainFor(type);
+  if (level == null) return c[0];
+  const i = c.indexOf(level);
+  return i >= 0 && i + 1 < c.length ? c[i + 1] : null;
+}
+const isTank = m => m.unit.type === 'ln2';
+const levelPlural = l => ({ shelf: 'shelves', box: 'boxes', space: 'loose spaces' }[l] || l + 's');
 const GRID_PRESETS = [[9, 9], [10, 10], [8, 12], [5, 5], [7, 7], [8, 8], [4, 4]];
 const USER_COLORS = ['#e4572e', '#3b82f6', '#8b5cf6', '#059669', '#d97706', '#db2777', '#0891b2', '#65a30d', '#7c3aed', '#dc2626', '#0d9488', '#9333ea'];
 const REMOVE_REASONS = ['Used up', 'Discarded', 'Thawed for culture', 'Shipped / given away', 'Expired', 'Moved to another lab'];
@@ -659,14 +671,17 @@ async function viewUnit(uid, nid, query) {
   else if (node.level === 'shelf') diagram = shelfView(m, node);
   else if (node.level === 'rack') diagram = rackView(m, node);
   else if (node.level === 'row') diagram = rowView(m, node);
+  else if (node.level === 'space') diagram = spaceView(m, node);
   else diagram = boxView(m, node, query);
 
+  const backTo = node ? (node.parent_id ? nodeLabel(m.nodes.get(node.parent_id)) : m.unit.name) : 'all storage';
   return h('div', { class: t.cls },
-    crumbs,
+    h('div', { class: 'nav-row' },
+      h('a', { class: 'btn back-btn', href: back, title: 'Go back one level' }, h('span', { class: 'arrow' }, '←'), `Back to ${backTo}`),
+      crumbs),
     h('div', { class: 'page-head' },
-      h('div', { class: 'titles' }, h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('h1', null, title)), h('p', null, sub)),
       node ? locator(m, node) : null,
-      h('a', { class: 'btn', href: back }, '↑ Up'),
+      h('div', { class: 'titles' }, h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('h1', null, title)), h('p', null, sub)),
       node ? null : h('a', { class: 'btn', href: `#/unit/${uid}/edit` }, 'Edit details')),
     h('div', { class: 'unit-layout' },
       h('div', { class: 'diagram', 'data-dnd': true, 'data-unit': uid }, h('div', { class: 'toolbar' }, hl, legend(m), h('span', { class: 'spacer' })), diagram),
@@ -681,19 +696,18 @@ function locator(m, node) {
   const cellTitle = n => n.level === 'space' ? `${nodeLabel(n)} (${plural(looseCount(m, n.id), 'item')})` : `${nodeLabel(n)} — ${stats(m, n.id).used}/${stats(m, n.id).cap}`;
   let unitMap;
   const lplan = unitPlan(m.unit);
-  const lsh = shelf || shelves[0];
-  if (m.unit.type === 'ln2' && lsh && planFits(lplan, kidsOf(m, lsh.id))) {
+  const tankPieces = kidsOf(m, null).filter(p => p.level === 'rack' || p.level === 'space');
+  if (isTank(m) && planFits(lplan, tankPieces)) {
     const { pos, size } = planGeom(lplan, 50, 44);
-    const byPos = new Map(kidsOf(m, lsh.id).map(p => [p.position, p]));
+    const byPos = new Map(tankPieces.map(p => [p.position, p]));
     const cells = lplan.slots.map((sl, i) => {
       const [x, y] = pos(sl), p = byPos.get(i);
       return `<rect class="${p && piece && p.id === piece.id ? 'on' : ''}${p ? '' : ' empty'}${p && p.level === 'space' ? ' space' : ''}" ${p ? `data-href="${nodeHref(m, p.id)}"` : ''} x="${(x - size / 2).toFixed(1)}" y="${(y - size / 2).toFixed(1)}" width="${size.toFixed(1)}" height="${size.toFixed(1)}" rx="1.5"><title>${esc(p ? cellTitle(p) : 'Empty slot ' + sl.name)}</title></rect>`;
     }).join('');
     const walls = lplan.dividers ? '<line class="divider" x1="50" y1="6" x2="50" y2="94"/><line class="divider" x1="6" y1="50" x2="94" y2="50"/>' : '';
     unitMap = h('div', { class: 'loc-map', html: `<svg viewBox="0 0 100 100" class="loc-dewar"><circle class="wall" cx="50" cy="50" r="48"/>${walls}${cells}</svg>` });
-  } else if (m.unit.type === 'ln2') {
-    const sh = shelf || shelves[0];
-    const pieces = kidsOf(m, sh.id);
+  } else if (isTank(m)) {
+    const pieces = tankPieces;
     const slots = [];
     pieces.forEach(p => { for (let k = 0; k < (p.level === 'space' ? (p.span || 1) : 1); k++) slots.push(p); });
     const n = slots.length, C = 50;
@@ -824,71 +838,64 @@ function planSVG(m, sh, plan, pieces) {
 }
 
 function dewarView(m) {
-  const shelves = kidsOf(m, null);
-  if (!shelves.length) return h('div', { class: 'card empty-note' }, 'No tiers yet — add a shelf/tier from the panel on the right.');
+  const pieces = kidsOf(m, null).filter(p => p.level === 'rack' || p.level === 'space');
+  if (!pieces.length) return h('div', { class: 'card empty-note' }, 'No racks yet — add racks from the panel on the right.');
   const plan = unitPlan(m.unit);
-  return h('div', { class: 'dewar-wrap' }, shelves.map(sh => {
-    const pieces = kidsOf(m, sh.id);
-    if (planFits(plan, pieces)) {
-      const lc = looseCount(m, sh.id);
-      return h('div', { class: 'dewar', 'data-drop-parent': sh.id, 'data-plan': '1', style: { flex: shelves.length > 1 ? '1 1 300px' : '1 1 100%' } },
-        h('div', { class: 'shelf-head' }, h('a', { href: nodeHref(m, sh.id) }, shelves.length > 1 ? nodeLabel(sh) : `${nodeLabel(sh)} (top view)`),
-          ownerChip(sh.owner_id, sh.is_common, { short: true }), lc ? h('span', { class: 'pill' }, `${lc} loose`) : null,
-          h('span', { class: 'spacer' }), h('span', { class: 'faint' }, `${pieces.length}/${plan.slots.length} slots used`)),
-        h('div', { html: `<svg viewBox="0 0 320 320" role="img" aria-label="Top view of ${esc(m.unit.name)}">
-          <circle class="wall" cx="160" cy="160" r="156"/><circle class="inner" cx="160" cy="160" r="142"/>${planSVG(m, sh, plan, pieces)}</svg>` }));
-    }
+  const arranged = planFits(plan, pieces);
+  let parts;
+  if (arranged) parts = planSVG(m, null, plan, pieces);
+  else {
     // Each rack takes one slot round the tank; a loose space takes `span` consecutive slots.
-    const slots = [];
-    pieces.forEach(p => { for (let k = 0; k < (p.level === 'space' ? (p.span || 1) : 1); k++) slots.push(p); });
-    const n = slots.length;
-    const C = 160, places = [];
-    function ring(i, count, R) { const a = -Math.PI / 2 + 2 * Math.PI * i / count; return [C + R * Math.cos(a), C + R * Math.sin(a), R * 2 * Math.sin(Math.PI / Math.max(count, 2))]; }
-    if (n === 1) places.push([C, C, 0]);
-    else if (n <= 9) slots.forEach((_, i) => places.push(ring(i, n, n <= 4 ? 62 : 82)));
-    else {
-      const inner = Math.min(7, Math.round(n / 3)), outer = n - inner;
-      for (let i = 0; i < outer; i++) places.push(ring(i, outer, 100));
-      for (let i = 0; i < inner; i++) places.push(ring(i, inner, 46));
-    }
-    const size = Math.max(22, Math.min(58, ...places.map(p => p[2] ? p[2] * 0.78 : 80)));
-    const bySlot = new Map();
-    slots.forEach((p, i) => { if (!bySlot.has(p.id)) bySlot.set(p.id, []); bySlot.get(p.id).push(places[i]); });
-    const parts = pieces.map(r => {
-      const pl = bySlot.get(r.id) || [];
-      const [x, y] = pl[0] || [C, C];
-      const own = r.owner_id || r.is_common;
-      if (r.level === 'space') {
-        const cnt = looseCount(m, r.id);
-        const match = !state.highlight || ownerMatch(nodeOwner(m, r.id)) || m.loose.some(it => it.node_id === r.id && ownerMatch(itemOwner(m, it)));
-        const cx = pl.reduce((a, p) => a + p[0], 0) / pl.length, cy = pl.reduce((a, p) => a + p[1], 0) / pl.length;
-        return `<g class="rk space${match ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
-          <title>${esc(nodeLabel(r))} — ${cnt} loose item(s) · ${pl.length} slot(s) · drag to move</title>
-          ${pl.map(([px, py]) => `<rect x="${px - size / 2}" y="${py - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}"/>`).join('')}
-          <text class="long" x="${cx}" y="${cy - (size > 34 ? 5 : 0)}">${esc(r.name && !/^Loose space \d+$/.test(r.name) ? r.name.slice(0, 7) : 'Loose')}</text>
-          ${size > 34 ? `<text class="sub" x="${cx}" y="${cy + 9}">${cnt} item${cnt === 1 ? '' : 's'}</text>` : ''}
-        </g>`;
+      const slots = [];
+      pieces.forEach(p => { for (let k = 0; k < (p.level === 'space' ? (p.span || 1) : 1); k++) slots.push(p); });
+      const n = slots.length;
+      const C = 160, places = [];
+      function ring(i, count, R) { const a = -Math.PI / 2 + 2 * Math.PI * i / count; return [C + R * Math.cos(a), C + R * Math.sin(a), R * 2 * Math.sin(Math.PI / Math.max(count, 2))]; }
+      if (n === 1) places.push([C, C, 0]);
+      else if (n <= 9) slots.forEach((_, i) => places.push(ring(i, n, n <= 4 ? 62 : 82)));
+      else {
+        const inner = Math.min(7, Math.round(n / 3)), outer = n - inner;
+        for (let i = 0; i < outer; i++) places.push(ring(i, outer, 100));
+        for (let i = 0; i < inner; i++) places.push(ring(i, inner, 46));
       }
-      const s = stats(m, r.id);
-      const lbl = r.name ? r.name.replace(/^Rack /, '').slice(0, 6) : String(r.index + 1);
-      return `<g class="rk${nodeMatches(m, r.id) ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
-        <title>${esc(nodeLabel(r))} — ${s.used}/${s.cap} filled${own ? ' · ' + esc(ownerName(r.owner_id, r.is_common)) : ''} · drag to move</title>
-        <rect x="${x - size / 2}" y="${y - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}" style="fill:${fillColor(frac(s))}"/>
-        ${own ? `<rect x="${x - size / 2 + 4}" y="${y + size / 2 - 7}" width="${size - 8}" height="3" rx="1.5" style="fill:${r.is_common ? 'var(--text-faint)' : userColor(r.owner_id)};stroke:none"/>` : ''}
-        <text class="${lbl.length > 3 ? 'long' : ''}" x="${x}" y="${y - (size > 34 ? 5 : 0)}">${esc(lbl)}</text>
-        ${size > 34 ? `<text class="sub" x="${x}" y="${y + 9}">${s.cap ? Math.round(100 * frac(s)) + '%' : '—'}</text>` : ''}
-      </g>`;
-    }).join('');
-    const lc = looseCount(m, sh.id);
-    const nr = pieces.filter(p => p.level === 'rack').length, ns = pieces.length - nr;
-    return h('div', { class: 'dewar', 'data-drop-parent': sh.id, style: { flex: shelves.length > 1 ? '1 1 300px' : '1 1 100%' } },
-      h('div', { class: 'shelf-head' }, h('a', { href: nodeHref(m, sh.id) }, shelves.length > 1 ? nodeLabel(sh) : `${nodeLabel(sh)} (top view)`),
-        ownerChip(sh.owner_id, sh.is_common, { short: true }), lc ? h('span', { class: 'pill' }, `${lc} loose`) : null,
-        h('span', { class: 'spacer' }), h('span', { class: 'faint' }, plural(nr, 'rack') + (ns ? ` · ${plural(ns, 'loose space')}` : ''))),
-      h('div', { html: `<svg viewBox="0 0 320 320" role="img" aria-label="Top view of ${esc(m.unit.name)}">
-        <circle class="wall" cx="160" cy="160" r="156"/><circle class="inner" cx="160" cy="160" r="142"/>
-        <circle class="vapor" cx="160" cy="160" r="128"/>${parts}</svg>` }));
-  }));
+      const size = Math.max(22, Math.min(58, ...places.map(p => p[2] ? p[2] * 0.78 : 80)));
+      const bySlot = new Map();
+      slots.forEach((p, i) => { if (!bySlot.has(p.id)) bySlot.set(p.id, []); bySlot.get(p.id).push(places[i]); });
+      parts = pieces.map(r => {
+        const pl = bySlot.get(r.id) || [];
+        const [x, y] = pl[0] || [C, C];
+        const own = r.owner_id || r.is_common;
+        if (r.level === 'space') {
+          const cnt = looseCount(m, r.id);
+          const match = !state.highlight || ownerMatch(nodeOwner(m, r.id)) || m.loose.some(it => it.node_id === r.id && ownerMatch(itemOwner(m, it)));
+          const cx = pl.reduce((a, p) => a + p[0], 0) / pl.length, cy = pl.reduce((a, p) => a + p[1], 0) / pl.length;
+          return `<g class="rk space${match ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
+            <title>${esc(nodeLabel(r))} — ${cnt} loose item(s) · ${pl.length} slot(s) · drag to move</title>
+            ${pl.map(([px, py]) => `<rect x="${px - size / 2}" y="${py - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}"/>`).join('')}
+            <text class="long" x="${cx}" y="${cy - (size > 34 ? 5 : 0)}">${esc(r.name && !/^Loose space \d+$/.test(r.name) ? r.name.slice(0, 7) : 'Loose')}</text>
+            ${size > 34 ? `<text class="sub" x="${cx}" y="${cy + 9}">${cnt} item${cnt === 1 ? '' : 's'}</text>` : ''}
+          </g>`;
+        }
+        const s = stats(m, r.id);
+        const lbl = r.name ? r.name.replace(/^Rack /, '').slice(0, 6) : String(r.index + 1);
+        return `<g class="rk${nodeMatches(m, r.id) ? '' : ' dim'}" data-href="${nodeHref(m, r.id)}" data-drag="${r.id}">
+          <title>${esc(nodeLabel(r))} — ${s.used}/${s.cap} filled${own ? ' · ' + esc(ownerName(r.owner_id, r.is_common)) : ''} · drag to move</title>
+          <rect x="${x - size / 2}" y="${y - size / 2}" width="${size}" height="${size}" rx="${size * 0.22}" style="fill:${fillColor(frac(s))}"/>
+          ${own ? `<rect x="${x - size / 2 + 4}" y="${y + size / 2 - 7}" width="${size - 8}" height="3" rx="1.5" style="fill:${r.is_common ? 'var(--text-faint)' : userColor(r.owner_id)};stroke:none"/>` : ''}
+          <text class="${lbl.length > 3 ? 'long' : ''}" x="${x}" y="${y - (size > 34 ? 5 : 0)}">${esc(lbl)}</text>
+          ${size > 34 ? `<text class="sub" x="${x}" y="${y + 9}">${s.cap ? Math.round(100 * frac(s)) + '%' : '—'}</text>` : ''}
+        </g>`;
+      }).join('');
+  }
+  const lc = looseCount(m, null);
+  const nr = pieces.filter(p => p.level === 'rack').length, ns = pieces.length - nr;
+  return h('div', { class: 'dewar-wrap' }, h('div', { class: 'dewar', 'data-drop-parent': '', 'data-plan': arranged ? '1' : null, style: { flex: '1 1 100%' } },
+    h('div', { class: 'shelf-head' }, h('span', null, 'Top view'), lc ? h('span', { class: 'pill' }, `${lc} loose`) : null,
+      h('span', { class: 'spacer' }), h('span', { class: 'faint' },
+        arranged ? `${pieces.length}/${plan.slots.length} slots used` : plural(nr, 'rack') + (ns ? ` · ${plural(ns, 'loose space')}` : ''))),
+    h('div', { html: `<svg viewBox="0 0 320 320" role="img" aria-label="Top view of ${esc(m.unit.name)}">
+      <circle class="wall" cx="160" cy="160" r="156"/><circle class="inner" cx="160" cy="160" r="142"/>
+      ${arranged ? '' : '<circle class="vapor" cx="160" cy="160" r="128"/>'}${parts}</svg>` })));
 }
 function shelfView(m, shelf) {
   const racks = kidsOf(m, shelf.id);
@@ -905,7 +912,31 @@ function boxTile(m, b, big = false) {
     h('div', { class: 'tile-sub' }, `${s.used}/${s.cap}`),
     fillGauge(s), ownerBar(b));
 }
+/** A loose space: a dashed area (wider for wider spaces) holding its loose items as cards. */
+function spaceView(m, sp) {
+  const list = m.loose.filter(i => i.node_id === sp.id);
+  const span = sp.span || 1;
+  return h('div', null,
+    h('div', { class: 'space-frame', style: { maxWidth: `${Math.min(150 + 110 * span, 560)}px` } },
+      list.map(it => {
+        const o = itemOwner(m, it);
+        return h('button', { class: 'space-item' + (ownerMatch(o) ? '' : ' dim'), style: { '--cc': catColor(it.category_id) }, onclick: () => openItem(it.id) },
+          h('b', null, it.name), h('span', null, [it.quantity, it.loose_where].filter(Boolean).join(' · ') || ' '));
+      }),
+      state.moving
+        ? h('button', { class: 'space-item add', onclick: () => moveLoose(m, sp) }, `Put “${state.moving.name}” here`)
+        : h('button', { class: 'space-item add', onclick: () => openItemForm({ m, shelf: sp, loose: true }) }, '+ Add item')),
+    h('p', { class: 'small faint', style: { marginTop: '8px' } }, `${span} rack-width${span > 1 ? 's' : ''} wide · ${plural(list.length, 'item')}`));
+}
 function rackView(m, rack) {
+  if (isTank(m)) {
+    const boxes = kidsOf(m, rack.id);
+    if (!boxes.length) return h('div', { class: 'card empty-note' }, 'This rack has no boxes yet — add boxes from the panel.');
+    return h('div', null,
+      h('div', { class: 'rack-frame row-frame tank-rack' }, h('div', { class: 'rack-row', 'data-drop-parent': rack.id },
+        h('div', { class: 'row-boxes col' }, boxes.map(b => boxTile(m, b, true))))),
+      h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Box 1 is at the top of the rack. Drag boxes to reorder them (long-press on a phone).'));
+  }
   const rowsN = kidsOf(m, rack.id);
   if (!rowsN.length) return h('div', { class: 'card empty-note' }, 'This rack has no rows yet — add rows from the panel.');
   return h('div', { class: 'rack-frame' }, rowsN.map(r => {
@@ -1012,9 +1043,12 @@ function unitSide(m) {
     looseCard(m, null),
     h('div', { class: 'card' },
       h('div', { class: 'card-head' }, h('h3', null, 'Layout')),
-      h('p', { class: 'small muted' }, `${plural(kidsOf(m, null).length, 'shelf')} — click a shelf or rack in the diagram to rename it, assign it to someone, or change what's inside.`.replace('shelfs', 'shelves')),
+      h('p', { class: 'small muted' }, isTank(m)
+        ? `${plural(kidsOf(m, null).filter(x => x.level === 'rack').length, 'rack')} — click a rack in the diagram to rename it, assign it to someone, or change its boxes.`
+        : `${plural(kidsOf(m, null).length, 'shelf')} — click a shelf or rack in the diagram to rename it, assign it to someone, or change what's inside.`.replace('shelfs', 'shelves')),
       h('div', { class: 'row', style: { marginTop: '10px' } },
-        h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, null) }, '+ Add shelf'),
+        h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, null) }, isTank(m) ? '+ Add rack' : '+ Add shelf'),
+        isTank(m) ? h('button', { class: 'btn sm', onclick: () => addSpaceDialog(m, null) }, '+ Add loose space') : null,
         h('a', { class: 'btn sm', href: `#/search?unit_id=${u.id}` }, 'List all items'),
         h('a', { class: 'btn sm', href: `#/activity?unit_id=${u.id}` }, 'History'),
         h('button', { class: 'btn sm', onclick: () => savePreset(m) }, 'Save as preset'))),
@@ -1070,7 +1104,7 @@ function nodeSide(m, node) {
     if (await attempt(() => api('PUT', `/api/nodes/${node.id}`, body), 'Saved')) refresh();
   };
   const s = stats(m, node.id);
-  const child = CHILD[node.level];
+  const child = childLevel(m.unit.type, node.level);
   return [
     h('div', { class: 'card' },
       h('div', { class: 'card-head' }, h('h3', null, LEVEL[node.level] + ' settings'),
@@ -1080,10 +1114,11 @@ function nodeSide(m, node) {
     node.level === 'rack' || node.level === 'space' || node.level === 'box' ? placeCard(m, node) : null,
     h('div', { class: 'card' },
       h('div', { class: 'row' },
-        child ? h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, node) }, `+ Add ${LEVEL[child].toLowerCase()}s`) : null,
+        child ? h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, node) }, `+ Add ${levelPlural(child)}`) : null,
         node.level === 'shelf' ? h('button', { class: 'btn sm', onclick: () => addSpaceDialog(m, node) }, '+ Add loose space') : null,
         node.level === 'rack' ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, 'Replace with loose space') : null,
         node.level === 'space' ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, 'Replace with rack') : null,
+        node.level === 'space' ? mergeButtons(m, node) : null,
         node.level === 'box' ? h('a', { class: 'btn sm', href: `#/search?unit_id=${m.unit.id}&q=${encodeURIComponent('"' + chainOf(m, node.id).map(nodeLabel).join(' › ') + ' ›"')}` }, 'Search in box') : null,
         h('span', { class: 'spacer' }),
         h('button', { class: 'btn sm danger', onclick: () => deleteNode(m, node) }, `Delete ${LEVEL[node.level].toLowerCase()}`))),
@@ -1113,18 +1148,21 @@ function placeCard(m, node) {
   const sibs = kidsOf(m, node.parent_id);
   const i = sibs.findIndex(x => x.id === node.id);
   const isBox = node.level === 'box';
-  // Racks/spaces can go to any shelf; a box to any row of its rack.
-  const parents = isBox ? kidsOf(m, m.nodes.get(node.parent_id).parent_id) : kidsOf(m, null);
+  const holder = node.parent_id ? m.nodes.get(node.parent_id) : null;
+  // Racks/spaces can go to any shelf; a box to any row of its rack (in a tank: to any rack).
+  const parents = isBox ? (isTank(m) ? kidsOf(m, null).filter(x => x.level === 'rack') : kidsOf(m, holder.parent_id))
+    : (isTank(m) ? [] : kidsOf(m, null));
+  const vertical = isBox && isTank(m);
   const shelves = parents;
   const shelfSel = h('select', { class: 'input' }, parents.map(sh => h('option', { value: sh.id }, nodeLabel(sh))));
   shelfSel.value = String(node.parent_id);
   shelfSel.onchange = () => placeNode(m, node, +shelfSel.value, null);
   return h('div', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', null, 'Position'), h('span', { class: 'small muted' }, `${i + 1} of ${sibs.length} on ${nodeLabel(m.nodes.get(node.parent_id))}`)),
+    h('div', { class: 'card-head' }, h('h3', null, 'Position'), h('span', { class: 'small muted' }, `${i + 1} of ${sibs.length} in ${holder ? nodeLabel(holder) : m.unit.name}`)),
     h('div', { class: 'row' },
-      h('button', { class: 'btn sm', disabled: i === 0, onclick: () => placeNode(m, node, node.parent_id, sibs[i - 1].id) }, '◀ Move left'),
-      h('button', { class: 'btn sm', disabled: i === sibs.length - 1, onclick: () => placeNode(m, node, node.parent_id, sibs[i + 2] ? sibs[i + 2].id : null) }, 'Move right ▶')),
-    shelves.length > 1 ? field(isBox ? 'Row' : 'Shelf', shelfSel, `moves it to the end of that ${isBox ? 'row' : 'shelf'}`) : null,
+      h('button', { class: 'btn sm', disabled: i === 0, onclick: () => placeNode(m, node, node.parent_id, sibs[i - 1].id) }, vertical ? '▲ Move up' : '◀ Move left'),
+      h('button', { class: 'btn sm', disabled: i === sibs.length - 1, onclick: () => placeNode(m, node, node.parent_id, sibs[i + 2] ? sibs[i + 2].id : null) }, vertical ? 'Move down ▼' : 'Move right ▶')),
+    shelves.length > 1 ? field(isBox ? (isTank(m) ? 'Rack' : 'Row') : 'Shelf', shelfSel, `moves it to the ${vertical ? 'bottom' : 'end'} of that ${isBox ? (isTank(m) ? 'rack' : 'row') : 'shelf'}`) : null,
     h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Or drag it in the diagram (long-press on a phone).'));
 }
 async function placeNode(m, node, parentId, beforeId) {
@@ -1136,25 +1174,45 @@ async function placeNode(m, node, parentId, beforeId) {
 function addSpaceDialog(m, shelf) {
   const err = h('p', { class: 'error' });
   const form = h('form', { class: 'stack' },
-    h('p', { class: 'small muted' }, 'A loose space is room on the shelf for things that are not in racks or boxes: bottles, bags, flasks, bulky kits.'),
+    h('p', { class: 'small muted' }, `A loose space is room ${shelf ? 'on the shelf' : 'in the tank'} for things that are not in racks or boxes: bottles, bags, canes, bulky kits.`),
     h('div', { class: 'grid2' },
       field('Width', inp('span', 1, { type: 'number', min: 1, max: 30 }), 'in rack spaces'),
       field('Name', inp('name', '', { placeholder: 'optional, e.g. Media bottles' }))), err);
   const go = async () => {
     const v = formData(form);
-    try { await api('POST', `/api/units/${m.unit.id}/nodes`, { parent_id: shelf.id, level: 'space', span: +v.span || 1, name: v.name }); close(); toast('Loose space added'); refresh(); }
+    try { await api('POST', `/api/units/${m.unit.id}/nodes`, { parent_id: shelf ? shelf.id : null, level: 'space', span: +v.span || 1, name: v.name }); close(); toast('Loose space added'); refresh(); }
     catch (x) { err.textContent = x.message; }
   };
   form.onsubmit = e => { e.preventDefault(); go(); };
-  const close = openModal({ title: `Add loose space to ${nodeLabel(shelf)}`, body: form,
+  const close = openModal({ title: `Add loose space to ${shelf ? nodeLabel(shelf) : m.unit.name}`, body: form,
     foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Add')] });
+}
+/** "Merge with …" for a loose space whose direct neighbour is also a loose space. */
+function mergeButtons(m, node) {
+  const sibs = kidsOf(m, node.parent_id);
+  if (!node.parent_id && planFits(unitPlan(m.unit), sibs)) return null;   // fixed tank slots
+  const i = sibs.findIndex(x => x.id === node.id);
+  return [sibs[i - 1], sibs[i + 1]].map((nb, k) => nb && nb.level === 'space'
+    ? h('button', { class: 'btn sm', title: 'Combine the two spaces into one (widths add up, items move over)', onclick: () => mergeSpaces(m, node, nb) },
+        k === 0 ? `◀ Merge with ${nodeLabel(nb)}` : `Merge with ${nodeLabel(nb)} ▶`) : null);
+}
+async function mergeSpaces(m, a, b) {
+  const [left, right] = kidsOf(m, a.parent_id).findIndex(x => x.id === a.id) < kidsOf(m, a.parent_id).findIndex(x => x.id === b.id) ? [a, b] : [b, a];
+  const nItems = looseCount(m, right.id);
+  const ok = await confirmBox(`Merge ${nodeLabel(right)} into ${nodeLabel(left)}?`,
+    `${nodeLabel(left)} becomes ${(left.span || 1) + (right.span || 1)} rack-widths wide` +
+    (nItems ? ` and takes over ${plural(nItems, 'item')} from ${nodeLabel(right)}` : '') + `. ${nodeLabel(right)} is removed. To split it again later, make it narrower and add a new loose space.`,
+    { okText: 'Merge' });
+  if (!ok) return;
+  const r = await attempt(() => api('POST', `/api/nodes/${a.id}/merge`, { with_id: b.id }), 'Merged');
+  if (r) location.hash = nodeHref(m, r.id);
 }
 async function convertNode(m, node) {
   if (node.level === 'rack') {
     const s = stats(m, node.id);
     if (s.used) { toast(`${nodeLabel(node)} still holds ${plural(s.used, 'item')} — move or remove them first.`, true); return; }
     const ok = await confirmBox(`Replace ${nodeLabel(node)} with a loose space?`,
-      `The empty rack (with its ${plural(kidsOf(m, node.id).length, 'row')} and boxes) is removed and a loose-item space takes its place on the shelf. You can widen the space afterwards, or turn it back into a rack.`,
+      `The empty rack (and its empty boxes) is removed and a loose-item space takes its place. You can widen the space afterwards, or turn it back into a rack.`,
       { okText: 'Replace with loose space' });
     if (ok && await attempt(() => api('POST', `/api/nodes/${node.id}/convert`), 'Now a loose space')) refresh();
     return;
@@ -1166,10 +1224,11 @@ async function convertNode(m, node) {
   if (!rackSib) Object.assign(d, TYPES[m.unit.type].layout);
   const err = h('p', { class: 'error' });
   const form = h('form', { class: 'stack' },
-    h('div', { class: 'grid2' }, layoutFieldsBelow('shelf', d)), gridFields(d), err);
+    h('div', { class: 'grid2' }, layoutFieldsBelow(m.unit.type, 'rack', d)), gridFields(d), err);
   const go = async () => {
     const v = formData(form);
-    const layout = { rows: +v.rows, boxes: +v.boxes, grid_rows: +v.grid_rows, grid_cols: +v.grid_cols, label_style: v.label_style };
+    const layout = { grid_rows: +v.grid_rows, grid_cols: +v.grid_cols, label_style: v.label_style };
+    for (const k of ['rows', 'boxes']) if (v[k] !== undefined) layout[k] = +v[k];
     try { await api('POST', `/api/nodes/${node.id}/convert`, { layout }); close(); toast('Now a rack'); refresh(); }
     catch (x) { err.textContent = x.message; }
   };
@@ -1177,16 +1236,15 @@ async function convertNode(m, node) {
   const close = openModal({ title: `Replace ${nodeLabel(node)} with a rack`, body: form,
     foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Replace with rack')] });
 }
-function layoutFieldsBelow(level, defaults) {
-  // inputs for the levels strictly below `level` (null = unit → everything below shelf)
+function layoutFieldsBelow(type, level, defaults) {
+  // inputs for the levels strictly below `level` (the level being added)
   const out = [];
-  let lvl = level ? CHILD[level] : 'shelf';
-  const labels = { racks: 'Racks per shelf', rows: 'Rows per rack', boxes: 'Boxes per row' };
-  lvl = CHILD[lvl];
+  const labels = { racks: 'Racks per shelf', rows: 'Rows per rack', boxes: type === 'ln2' ? 'Boxes per rack' : 'Boxes per row' };
+  let lvl = childLevel(type, level);
   while (lvl) {
     const k = LAYOUT_KEY[lvl];
     out.push(field(labels[k], inp(k, defaults[k] ?? 1, { type: 'number', min: 0, max: 40 })));
-    lvl = CHILD[lvl];
+    lvl = childLevel(type, lvl);
   }
   return out;
 }
@@ -1196,23 +1254,24 @@ function guessLayout(m, parentId, level) {
   const d = { racks: 4, rows: 4, boxes: 4, grid_rows: 9, grid_cols: 9, ...TYPES[m.unit.type].layout };
   let n = sib;
   let lvl = level;
-  while (n && CHILD[lvl]) {
+  while (n && childLevel(m.unit.type, lvl)) {
     const kids = kidsOf(m, n.id);
-    d[LAYOUT_KEY[CHILD[lvl]]] = kids.length;
-    n = kids[0]; lvl = CHILD[lvl];
+    lvl = childLevel(m.unit.type, lvl);
+    d[LAYOUT_KEY[lvl]] = kids.length;
+    n = kids[0];
   }
   if (n && n.level === 'box') { d.grid_rows = n.grid_rows; d.grid_cols = n.grid_cols; d.label_style = n.label_style; }
   return d;
 }
 function addChildrenDialog(m, parent) {
-  const level = parent ? CHILD[parent.level] : 'shelf';
+  const level = childLevel(m.unit.type, parent ? parent.level : null);
   const d = guessLayout(m, parent ? parent.id : null, level);
   const err = h('p', { class: 'error' });
   const form = h('form', { class: 'stack' },
     h('div', { class: 'grid2' },
       field(`Number of ${LEVEL[level].toLowerCase()}s to add`, inp('count', 1, { type: 'number', min: 1, max: 40 }), null, 'span-all'),
-      layoutFieldsBelow(parent ? parent.level : null, d)),
-    level === 'box' || CHILD[level] ? gridFields(d) : null,
+      layoutFieldsBelow(m.unit.type, level, d)),
+    gridFields(d),
     err);
   const go = async () => {
     const v = formData(form);
@@ -1302,7 +1361,7 @@ async function viewUnitForm(uid) {
   const drawTypes = () => {
     typePick.replaceChildren(...TYPE_ORDER.map(k => h('button', {
       type: 'button', class: `type-opt ${TYPES[k].cls}` + (type === k ? ' on' : ''),
-      onclick: () => { type = k; drawTypes(); if (!layoutTouched && !editing) applyDefaults(); sizeList.replaceChildren(...TYPES[type].sizes.map(s => h('option', { value: s }))); drawPreview(); },
+      onclick: () => { type = k; drawTypes(); if (!editing) drawLayout(layoutTouched ? { ...TYPES[type].layout, ...readLayout(true) } : TYPES[type].layout); sizeList.replaceChildren(...TYPES[type].sizes.map(s => h('option', { value: s }))); drawPreview(); },
     }, h('b', null, TYPES[k].short), h('span', null, TYPES[k].label))));
   };
   sizeList.replaceChildren(...TYPES[type].sizes.map(s => h('option', { value: s })));
@@ -1348,8 +1407,7 @@ async function viewUnitForm(uid) {
     type = p.type; drawTypes();
     sizeList.replaceChildren(...TYPES[type].sizes.map(sz => h('option', { value: sz })));
     for (const k of ['manufacturer', 'device_name', 'model', 'size']) { const el = form.querySelector(`[name=${k}]`); if (el && p[k] != null) el.value = p[k]; }
-    for (const [k, v] of Object.entries(p.layout)) { const el = layoutBox.querySelector(`[name=${k}]`); if (el) el.value = v; }
-    layoutBox.querySelector('[name=grid_rows]')?.dispatchEvent(new Event('input'));
+    drawLayout({ ...TYPES[type].layout, ...p.layout });
     plan = p.plan;
     layoutTouched = true;
     presetNote.textContent = [p.notes, plan ? `Racks are named ${plan.slots[0].name}–${plan.slots[plan.slots.length - 1].name} and placed as in the tank.` : null,
@@ -1363,35 +1421,42 @@ async function viewUnitForm(uid) {
     $('#loc-list', form)?.replaceChildren(...locs.map(l => h('option', { value: l })));
   }).catch(() => {});
 
-  function applyDefaults() {
-    const d = TYPES[type].layout;
-    for (const [k, v] of Object.entries(d)) { const el = layoutBox.querySelector(`[name=${k}]`); if (el) el.value = v; }
-    // Non-bubbling event: re-syncs the box-format dropdown without marking the layout as hand-edited.
-    layoutBox.querySelector('[name=grid_rows]')?.dispatchEvent(new Event('input'));
+  /** The layout card's fields follow the storage type: a tank is racks × boxes per rack,
+   *  anything else shelves × racks × rows × boxes. */
+  function drawLayout(d) {
+    const tank = type === 'ln2';
+    const num = (k, label, min, max) => field(label, inp(k, d[k] ?? 1, { type: 'number', min, max }));
+    layoutBox.replaceChildren(h('div', { class: 'card stack' },
+      h('h2', null, 'Layout'),
+      h('p', { class: 'small muted' }, tank
+        ? 'A tank holds racks, and each rack is a vertical stack of boxes. Every rack starts the same — you can add, remove, rename or re-fill racks and boxes afterwards.'
+        : 'Every shelf starts the same — you can add, remove, rename or resize individual shelves, racks, rows and boxes afterwards. Set a level to 0 to leave it empty (e.g. a fridge shelf for loose items only).'),
+      tank ? h('div', { class: 'grid2' }, num('racks', 'Racks', 1, 30), num('boxes', 'Boxes per rack', 0, 40))
+        : h('div', { class: 'grid4' }, num('shelves', 'Shelves', 1, 30), num('racks', 'Racks / shelf', 0, 30),
+            num('rows', 'Rows / rack', 0, 40), num('boxes', 'Boxes / row', 0, 40)),
+      gridFields(d)));
   }
   if (!editing) {
-    const d = TYPES[type].layout;
-    layoutBox.append(h('div', { class: 'card stack' },
-      h('h2', null, 'Layout'),
-      h('p', { class: 'small muted' }, 'Every shelf starts the same — you can add, remove, rename or resize individual shelves, racks, rows and boxes afterwards. Set a level to 0 to leave it empty (e.g. a fridge shelf for loose items only).'),
-      h('div', { class: 'grid4' },
-        field('Shelves', inp('shelves', d.shelves, { type: 'number', min: 1, max: 30 })),
-        field('Racks / shelf', inp('racks', d.racks, { type: 'number', min: 0, max: 30 })),
-        field('Rows / rack', inp('rows', d.rows, { type: 'number', min: 0, max: 40 })),
-        field('Boxes / row', inp('boxes', d.boxes, { type: 'number', min: 0, max: 40 }))),
-      gridFields(d)));
+    drawLayout(TYPES[type].layout);
     layoutBox.addEventListener('input', () => { layoutTouched = true; drawPreview(); });
     layoutBox.addEventListener('change', drawPreview);
   }
-  function readLayout() {
+  /** Counts for this type's levels only (raw = keep whatever fields exist, for carrying values over). */
+  function readLayout(raw = false) {
     const v = formData(layoutBox);
-    return { shelves: +v.shelves || 0, racks: +v.racks || 0, rows: +v.rows || 0, boxes: +v.boxes || 0, grid_rows: +v.grid_rows || 9, grid_cols: +v.grid_cols || 9, label_style: v.label_style };
+    const out = { grid_rows: +v.grid_rows || 9, grid_cols: +v.grid_cols || 9, label_style: v.label_style };
+    for (const lvl of raw ? Object.keys(LAYOUT_KEY) : chainFor(type)) {
+      const k = LAYOUT_KEY[lvl];
+      if (v[k] !== undefined) out[k] = +v[k] || 0;
+    }
+    return out;
   }
   function drawPreview() {
     if (editing) return;
     const L = readLayout();
-    const nb = L.shelves * L.racks * L.rows * L.boxes;
-    if (nb > 6000 || L.shelves > 30 || L.racks > 30 || L.rows > 40 || L.boxes > 40) {
+    const chain = chainFor(type);
+    const nb = chain.reduce((a, l) => a * (L[LAYOUT_KEY[l]] || 0), 1);
+    if (nb > 6000 || chain.some(l => (L[LAYOUT_KEY[l]] || 0) > 40)) {
       preview.replaceChildren(h('div', { class: 'card' }, h('p', { class: 'error' }, 'That layout is too large to preview.')));
       return;
     }
@@ -1401,11 +1466,11 @@ async function viewUnitForm(uid) {
       for (let i = 0; i < count; i++) {
         const n = { id: id++, parent_id: parent, level, position: i, name: null, owner_id: null, is_common: 0, grid_rows: L.grid_rows, grid_cols: L.grid_cols, label_style: L.label_style };
         nodes.push(n);
-        const c = CHILD[level];
+        const c = childLevel(type, level);
         if (c) mk(n.id, c, L[LAYOUT_KEY[c]]);
       }
     };
-    mk(null, 'shelf', L.shelves);
+    mk(null, chain[0], L[LAYOUT_KEY[chain[0]]]);
     const usePlan = planActive(L);
     if (usePlan) for (const n of nodes) if (n.level === 'rack') n.name = plan.slots[n.position].name || null;
     const m = buildModel({ unit: { id: 0, name: formData(form).name || 'New unit', type, manufacturer: formData(form).manufacturer, plan: usePlan ? plan : null }, nodes, items: [] });
@@ -1463,8 +1528,9 @@ function openItemForm(opts) {
   let whereSel = null;
   if (opts.loose && m) {
     whereSel = h('select', { class: 'input', name: '_where' }, h('option', { value: '' }, `${m.unit.name} (general)`),
-      kidsOf(m, null).map(s => [h('option', { value: s.id }, nodeLabel(s)),
-        kidsOf(m, s.id).filter(x => x.level === 'space').map(sp => h('option', { value: sp.id }, `${nodeLabel(s)} › ${nodeLabel(sp)}`))]));
+      kidsOf(m, null).map(s => s.level === 'space' ? h('option', { value: s.id }, nodeLabel(s))
+        : s.level === 'shelf' ? [h('option', { value: s.id }, nodeLabel(s)),
+          kidsOf(m, s.id).filter(x => x.level === 'space').map(sp => h('option', { value: sp.id }, `${nodeLabel(s)} › ${nodeLabel(sp)}`))] : null));
     whereSel.value = opts.shelf ? String(opts.shelf.id) : '';
   }
   const fillIn = opts.allowFill ? inp('_fill', 1, { type: 'number', min: 1, max: box.grid_rows * box.grid_cols }) : null;
@@ -1729,7 +1795,7 @@ async function viewSettings() {
       name.addEventListener('change', () => attempt(() => api('PUT', `/api/presets/${p.id}`, { name: name.value }), 'Preset renamed'));
       const L = p.layout;
       const summary = [[p.manufacturer, p.device_name, p.model].filter(Boolean).join(' · '),
-        `${plural(L.shelves, 'shelf').replace('shelfs', 'shelves')} × ${plural(L.racks, 'rack')} × ${plural(L.rows, 'row')} × ${plural(L.boxes, 'box').replace('boxs', 'boxes')} (${L.grid_rows}×${L.grid_cols})`,
+        chainFor(p.type).map(l => `${L[LAYOUT_KEY[l]] ?? 0} ${L[LAYOUT_KEY[l]] === 1 ? l : levelPlural(l)}`).join(' × ') + ` (${L.grid_rows}×${L.grid_cols} boxes)`,
         p.plan ? `compartment arrangement ${p.plan.slots[0].name}–${p.plan.slots[p.plan.slots.length - 1].name}` : null].filter(Boolean).join(' — ');
       return h('div', { class: 'preset-row' },
         h('span', { class: `type-badge ${TYPES[p.type].cls}` }, TYPES[p.type].short),

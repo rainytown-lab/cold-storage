@@ -33,7 +33,11 @@ under **Settings › People**, with a temporary password. Sign out from the top 
 - **Arranged tanks**: in a tank whose racks sit in fixed compartment slots,
   dragging a rack onto another rack swaps them, and dragging it onto an empty slot
   moves it there. The rack page has a matching Slot picker.
-- **Layout**: unit › shelf › rack › row › box › position. You set the counts when
+- **Liquid nitrogen tanks have no shelves or rows**: a tank holds racks, and each
+  rack is a vertical stack of boxes (box 1 at the top). You set racks and boxes per
+  rack when you add a tank. Tanks made by earlier versions are converted
+  automatically on startup, and their items stay in their boxes.
+- **Freezer/fridge layout**: unit › shelf › rack › row › box › position. You set the counts when
   you create a unit, and a live preview shows the result. After that you can add,
   delete, rename or reassign any shelf, rack, row or box, and resize a box
   (e.g. 9×9, 10×10, 8×12, or a custom size; positions labelled A1… or 1…n).
@@ -57,6 +61,12 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   It sits in line with the racks and is 1–N rack-widths wide. Open an empty rack
   and click "Replace with loose space" (or the reverse) to swap one for the other
   in the same spot.
+- **Merging loose spaces**: when two loose spaces sit side by side, either
+  one's panel offers "Merge with …". The left one stays, the widths add up, and
+  the other's items move over. Arranged tanks have fixed slots, so their spaces
+  can't be merged.
+- **Navigation**: a "← Back to …" button in the top-left corner goes up one level,
+  with the breadcrumb beside it.
 - **Drag & drop**: drag racks and loose spaces to reorder them or move them to
   another shelf. This works in the freezer front view and the LN₂ top view; on a
   phone, long-press first. A rack or space keeps its name when it moves. The side
