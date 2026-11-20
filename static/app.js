@@ -528,23 +528,17 @@ function showSetup() {
 // Home
 // ------------------------------------------------------------------------ //
 async function viewHome() {
-  const [units, stats, feed] = await Promise.all([api('GET', '/api/units'), api('GET', '/api/stats'), api('GET', '/api/activity?limit=12')]);
+  const [units, feed] = await Promise.all([api('GET', '/api/units'), api('GET', '/api/activity?limit=12')]);
   const groups = new Map();
   for (const u of units) {
     const k = u.location || 'No location set';
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(u);
   }
-  const stat = (n, label, href) => h('a', { class: 'stat', href, style: { color: 'inherit' } }, h('b', null, n.toLocaleString()), h('span', null, label));
   return h('div', null,
     h('div', { class: 'page-head' },
       h('div', { class: 'titles' }, h('h1', null, 'Cold storage'), h('p', null, `${plural(units.length, 'unit')} across ${plural(groups.size, 'location')}`)),
       h('a', { class: 'btn primary', href: '#/new' }, '+ Add storage')),
-    h('div', { class: 'stats' },
-      stat(stats.stored, 'items stored', '#/search'),
-      stat(stats.added_30d, 'added in the last 30 days', `#/search?status=all&added_from=${daysAgoISO(30)}`),
-      stat(stats.removed_30d, 'removed in the last 30 days', `#/search?status=removed&removed_from=${daysAgoISO(30)}`),
-      stat(stats.expiring, 'expired or expiring ≤ 30 days', '#/search?expiring=1')),
     units.length === 0
       ? h('div', { class: 'units' }, h('a', { class: 'unit-card add', href: '#/new' }, '+ Add your first freezer, fridge or LN₂ tank'))
       : [...groups.entries()].map(([loc, list]) => h('section', { class: 'loc-group' },
@@ -553,7 +547,6 @@ async function viewHome() {
       h('div', { class: 'card-head' }, h('h2', null, 'Recent activity'), h('a', { href: '#/activity', class: 'small' }, 'Full log →')),
       feedList(feed)));
 }
-function daysAgoISO(n) { const d = new Date(); d.setDate(d.getDate() - n); return d.toLocaleDateString('en-CA'); }
 function unitCard(u) {
   const t = TYPES[u.type];
   const boxed = u.stored - u.loose;
