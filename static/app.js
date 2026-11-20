@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 14;   // must match API_VERSION in app.py
+const API_VERSION = 15;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space', bin: 'Container' };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
 // Levels per storage type. LN2 tanks have no shelves or rows: racks stand in the tank and
@@ -1830,6 +1830,37 @@ async function viewUnitForm(uid) {
 // ------------------------------------------------------------------------ //
 // Items: add / edit / detail / remove
 // ------------------------------------------------------------------------ //
+// ---------- Category-specific item fields ----------
+// "concentration", "source" and "lot" live in the item's own columns; other keys go in item.extra.
+const COLUMN_FIELDS = ['concentration', 'source', 'lot'];
+const GENERIC_FIELDS = [{ key: 'concentration', label: 'Concentration', type: 'text' }, { key: 'source', label: 'Source', type: 'text' },
+  { key: 'lot', label: 'Lot / batch', type: 'text' }];
+const itemExtra = it => { try { return it && it.extra ? (typeof it.extra === 'string' ? JSON.parse(it.extra) : it.extra) : {}; } catch { return {}; } };
+/** The fields to show for an item of this category, plus any values it already has outside them. */
+function itemFields(catId, it) {
+  const cat = state.catsById.get(+catId);
+  const fields = cat ? (cat.fields || []) : GENERIC_FIELDS;
+  const have = new Set(fields.map(f => f.key));
+  const ex = itemExtra(it);
+  const extra = [
+    ...COLUMN_FIELDS.filter(k => it && it[k] && !have.has(k)).map(k => GENERIC_FIELDS.find(g => g.key === k)),
+    ...Object.keys(ex).filter(k => !have.has(k)).map(k => ({ key: k, label: k.replace(/_/g, ' ').replace(/^./, c => c.toUpperCase()), type: 'text' })),
+  ];
+  return [...fields, ...extra];
+}
+const itemValue = (it, key) => COLUMN_FIELDS.includes(key) ? (it && it[key]) || '' : itemExtra(it)[key] || '';
+function fieldInput(f, value) {
+  const attrs = { 'data-fkey': f.key, class: 'input' };
+  let el;
+  if (f.type === 'longtext') el = h('textarea', { ...attrs, class: 'input' + (/seq/i.test(f.key) ? ' mono-input' : ''), rows: 2 }, value || '');
+  else if (f.type === 'choice') {
+    const opts = [...(f.options || [])];
+    if (value && !opts.includes(value)) opts.push(value);
+    el = h('select', attrs, h('option', { value: '' }, '—'), opts.map(o => h('option', { value: o }, o)));
+    el.value = value || '';
+  } else el = h('input', { ...attrs, type: f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text', step: f.type === 'number' ? 'any' : null, value: value || '' });
+  return field(f.label, el, null, f.type === 'longtext' ? 'span-all' : null);
+}
 /** opts: {m, box, positions, allowFill} for a box; {m, shelf, loose:true} for loose; {item} to edit. */
 function openItemForm(opts) {
   const { m, box, item } = opts;
@@ -1881,18 +1912,32 @@ function openItemForm(opts) {
   fillIn && fillIn.addEventListener('input', updatePos);
   updatePos();
 
+  // Category first: it decides which detail fields the item gets.
+  const catSel = categorySelect(src.category_id);
+  catSel.options[0].textContent = '— Choose a category —';
+  const detailHead = h('h3', { class: 'span-all details-head' });
+  const detailBox = h('div', { class: 'grid2 span-all' });
+  const drawDetails = () => {
+    const typed = {};
+    for (const el of detailBox.querySelectorAll('[data-fkey]')) if (el.value) typed[el.dataset.fkey] = el.value;
+    const cat = state.catsById.get(+catSel.value);
+    const fields = itemFields(catSel.value, editing ? item : null);
+    detailHead.textContent = cat ? `${cat.name} details` : 'Details';
+    detailBox.replaceChildren(...fields.map(f => fieldInput(f, typed[f.key] ?? (editing ? itemValue(item, f.key) : ''))));
+    if (!fields.length) detailBox.append(h('p', { class: 'small faint span-all' }, `No extra fields for ${cat.name} — add some under Settings › Item categories.`));
+  };
+  catSel.addEventListener('change', drawDetails);
+  drawDetails();
   const form = h('form', { class: 'stack' },
     box && !editing ? posLine : null,
     h('div', { class: 'grid2' },
-      field('Name', inp('name', src.name, { required: true, placeholder: 'e.g. HEK293T p12, pUC19-GFP, anti-CD3 (OKT3)' }), null, 'span-all'),
-      field('Category', categorySelect(src.category_id)),
+      field('Category', catSel, null, 'span-all'),
+      field('Name', inp('name', src.name, { required: true, placeholder: 'e.g. HEK293T p12, GAPDH-F, anti-CD3 (OKT3)' }), null, 'span-all'),
       field('Owner', ownerSelect(src.owner_id, src.is_common, inheritLabel)),
+      field('Quantity', inp('quantity', src.quantity, { placeholder: 'e.g. 1 vial, 500 µL, 2×10⁶ cells' })),
       fillIn ? field('Number of tubes / aliquots', fillIn, null, 'span-all') : null,
       fillIn ? h('div', { class: 'span-all small faint', style: { marginTop: '-6px' } }, fillNote) : null,
-      field('Quantity', inp('quantity', src.quantity, { placeholder: 'e.g. 1 vial, 500 µL, 2×10⁶ cells' })),
-      field('Concentration', inp('concentration', src.concentration, { placeholder: 'e.g. 1 mg/mL' })),
-      field('Source', inp('source', src.source, { placeholder: 'Vendor, collaborator, prep…' })),
-      field('Lot / batch / passage', inp('lot', src.lot)),
+      detailHead, detailBox,
       field('Date added', inp('date_added', src.date_added || todayISO(), { type: 'date' })),
       field('Expiry date', inp('expiry_date', src.expiry_date, { type: 'date' })),
       loose && whereSel ? field('Loose space', whereSel) : null,
@@ -1906,8 +1951,15 @@ function openItemForm(opts) {
     if (!form.reportValidity()) return;
     const v = formData(form);
     const body = { name: v.name, category_id: v.category_id ? +v.category_id : null, ...ownerPayload(v.owner),
-      quantity: v.quantity, concentration: v.concentration, source: v.source, lot: v.lot,
-      date_added: v.date_added, expiry_date: v.expiry_date, notes: v.notes };
+      quantity: v.quantity, date_added: v.date_added, expiry_date: v.expiry_date, notes: v.notes };
+    // Category details: concentration / source / lot go to their columns, the rest to extra.
+    const extra = {};
+    for (const el of detailBox.querySelectorAll('[data-fkey]')) {
+      const k = el.dataset.fkey, val = el.value.trim();
+      if (COLUMN_FIELDS.includes(k)) body[k] = val; else if (val) extra[k] = val;
+    }
+    if (!editing) for (const k of COLUMN_FIELDS) if (!(k in body)) body[k] = '';
+    body.extra = extra;
     if (loose) body.loose_where = v.loose_where;
     try {
       if (editing) {
@@ -1951,7 +2003,9 @@ async function openItem(id) {
     ['Category', catLabel(it.category_id)],
     ['Owner', h('span', null, ownerEl, it.owner_from && it.owner_from !== 'item' ? h('span', { class: 'small faint' }, ` via ${it.owner_from}`) : null)],
     ['Location', h('span', null, removed ? h('span', { class: 'muted' }, 'was in ') : null, removed ? it.last_location : loc.text)],
-    ['Quantity', it.quantity], ['Concentration', it.concentration], ['Source', it.source], ['Lot / passage', it.lot],
+    ['Quantity', it.quantity],
+    // this category's own details (sequence, passage, catalog number…), in the category's order
+    ...itemFields(it.category_id, it).map(f => [f.label, itemValue(it, f.key) ? h('span', { class: /seq/i.test(f.key) ? 'mono-input' : null }, itemValue(it, f.key)) : null]),
     ['Expiry', it.expiry_date ? h('span', null, fmtDate(it.expiry_date), ' ', it.expiry_date < todayISO() ? h('span', { class: 'pill bad' }, 'expired') : null) : null],
     ['Added', `${fmtDate(it.date_added)}${it.added_by_name ? ' by ' + it.added_by_name : ''}`],
     removed ? ['Removed', `${fmtDate(it.date_removed)}${it.removed_by_name ? ' by ' + it.removed_by_name : ''}${it.removal_reason ? ' — ' + it.removal_reason : ''}`] : null,
@@ -2121,6 +2175,43 @@ async function viewActivity(query) {
 // ------------------------------------------------------------------------ //
 // Settings
 // ------------------------------------------------------------------------ //
+/** Edit the detail fields a category's items get (label, type, options, order). */
+function editCategoryFields(cat, after) {
+  const TYPE_LABELS = { text: 'Text', longtext: 'Long text', number: 'Number', date: 'Date', choice: 'Choice (dropdown)' };
+  let rows = (cat.fields || []).map(f => ({ ...f, options: (f.options || []).join(', ') }));
+  const list = h('div', { class: 'field-rows' });
+  const err = h('p', { class: 'error' });
+  const draw = () => list.replaceChildren(...rows.map((f, i) => {
+    const label = h('input', { class: 'input', value: f.label, placeholder: 'Field name, e.g. Passage number' });
+    label.oninput = () => { f.label = label.value; };
+    const type = h('select', { class: 'input' }, Object.entries(TYPE_LABELS).map(([v, l]) => h('option', { value: v }, l)));
+    type.value = f.type || 'text';
+    const opts = h('input', { class: 'input', value: f.options || '', placeholder: 'Options, comma-separated', hidden: type.value !== 'choice' });
+    opts.oninput = () => { f.options = opts.value; };
+    type.onchange = () => { f.type = type.value; opts.hidden = type.value !== 'choice'; };
+    const move = d => { const j = i + d; if (j < 0 || j >= rows.length) return; [rows[i], rows[j]] = [rows[j], rows[i]]; draw(); };
+    return h('div', { class: 'field-row' }, label, type,
+      h('div', { class: 'row', style: { flexWrap: 'nowrap', gap: '2px' } },
+        h('button', { class: 'btn sm ghost', type: 'button', title: 'Move up', disabled: i === 0, onclick: () => move(-1) }, '↑'),
+        h('button', { class: 'btn sm ghost', type: 'button', title: 'Move down', disabled: i === rows.length - 1, onclick: () => move(1) }, '↓'),
+        h('button', { class: 'btn sm ghost danger', type: 'button', title: 'Remove field', onclick: () => { rows.splice(i, 1); draw(); } }, '✕')),
+      opts);
+  }));
+  draw();
+  const go = async () => {
+    const fields = rows.filter(f => (f.label || '').trim()).map(f => ({ key: f.key, label: f.label.trim(), type: f.type || 'text',
+      options: f.type === 'choice' ? String(f.options || '').split(',').map(o => o.trim()).filter(Boolean) : undefined }));
+    try { await api('PUT', `/api/categories/${cat.id}`, { fields }); close(); toast(`${cat.name} fields saved`); after && after(); }
+    catch (x) { err.textContent = x.message; }
+  };
+  const close = openModal({ title: `${cat.name}: item fields`, wide: true,
+    body: h('div', { class: 'stack' },
+      h('p', { class: 'small muted' }, `These appear under “${cat.name} details” when adding or editing an item. Every item also has name, owner, quantity, dates and notes. Removing a field here doesn't delete values already saved on items.`),
+      list,
+      h('button', { class: 'btn sm', type: 'button', onclick: () => { rows.push({ label: '', type: 'text' }); draw(); list.lastChild?.querySelector('input')?.focus(); } }, '+ Add field'),
+      err),
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Save fields')] });
+}
 async function viewSettings() {
   await loadRefs();
   const presets = await api('GET', '/api/presets').catch(() => []);
@@ -2172,6 +2263,8 @@ async function viewSettings() {
     };
     name.addEventListener('change', save); color.addEventListener('change', save);
     return h('div', { class: 'cat-row' }, color, name, h('span', { class: 'small faint', style: { minWidth: '64px', textAlign: 'right' } }, `${c.stored} stored`),
+      h('button', { class: 'btn sm', title: `Fields for ${c.name} items`, onclick: () => editCategoryFields(c, async () => { await loadRefs(); drawCats(); }) },
+        `Fields (${(c.fields || []).length})…`),
       h('button', { class: 'btn sm ghost danger', title: 'Delete category', onclick: async () => {
         if (!await confirmBox(`Delete “${c.name}”?`, 'Only categories with no items (stored or removed) can be deleted.', { okText: 'Delete', danger: true })) return;
         if (await attempt(() => api('DELETE', `/api/categories/${c.id}`), 'Deleted')) { await loadRefs(); drawCats(); }

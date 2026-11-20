@@ -703,3 +703,11 @@ h1 { font-size: 26px; font-weight: 750; }
   #quick-search input { width: 100%; }
   #me-box .btn { padding: 5px 8px; }
 }
+
+/* Category details in the item form */
+.details-head { margin: 6px 0 -4px; padding-top: 10px; border-top: 1px solid var(--border); }
+.mono-input { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .03em; word-break: break-all; }
+.field-rows { display: flex; flex-direction: column; gap: 8px; }
+.field-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+.field-row > input[placeholder^="Options"] { grid-column: 1 / -1; }
+@media (max-width: 560px) { .field-row { grid-template-columns: 1fr auto; } .field-row > select { grid-column: 1 / -1; } }

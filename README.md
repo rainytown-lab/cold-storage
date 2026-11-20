@@ -62,10 +62,18 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   that doesn't belong to the chosen person (or to Common).
 - **Assignments**: a person or **Common** can be set on a unit, shelf, rack, row,
   box or a single item. Anything left unassigned inherits from the level above it.
-- **Items**: name, category, owner, quantity, concentration, source, lot/passage,
-  expiry, date added, notes. Click an empty position to add an item, and use
-  "Number of tubes" to fill the next N positions with aliquots. Shift-click (or
-  "Select positions") selects several at once to add or remove in bulk.
+- **Items**: choose the **category first** when adding an item; the form then
+  shows that category's own fields alongside name, owner, quantity, date added,
+  expiry and notes. Built-in examples: Primers (sequence, direction, target gene,
+  species, concentration, Tm, supplier), Cells (date frozen, passage, vessel size,
+  cells per vial…), Antibodies (brand, catalog number, host, target, clone,
+  conjugate, isotype…), plus sets for plasmids, glycerol stocks, DNA, RNA, protein,
+  tissue, serum and reagents. Each category's fields can be edited under
+  Settings › Item categories › Fields… (text, long text, number, date or dropdown).
+  These details show on the item's page, are searchable, and are exported to CSV.
+  Click an empty position to add an item; "Number of tubes" fills the next N
+  positions with aliquots. Shift-click (or "Select positions") selects several at
+  once to add or remove in bulk.
 - **Loose items**: things that aren't in a box always live in a **loose space**,
   a drawn section of the shelf or tank (like a tube lives in a box), with an
   optional free-text spot ("door", "bottom bin"). Loose items left outside a loose

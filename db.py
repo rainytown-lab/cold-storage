@@ -72,7 +72,8 @@ CREATE TABLE IF NOT EXISTS categories (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
     name  TEXT NOT NULL UNIQUE COLLATE NOCASE,
     color TEXT NOT NULL DEFAULT '#9aa0a6',
-    sort  INTEGER NOT NULL DEFAULT 0
+    sort  INTEGER NOT NULL DEFAULT 0,
+    fields TEXT                     -- JSON list of this category's item fields (see DEFAULT_CATEGORY_FIELDS)
 );
 
 CREATE TABLE IF NOT EXISTS units (
@@ -146,6 +147,7 @@ CREATE TABLE IF NOT EXISTS items (
     lot           TEXT,
     expiry_date   TEXT,
     notes         TEXT,
+    extra         TEXT,                 -- JSON {field key: value} for the category's own fields
     status        TEXT NOT NULL DEFAULT 'stored',  -- stored | removed
     date_added    TEXT NOT NULL,
     added_by      INTEGER REFERENCES users(id) ON DELETE SET NULL,
@@ -176,9 +178,53 @@ CREATE INDEX IF NOT EXISTS idx_activity_item ON activity(item_id);
 CREATE INDEX IF NOT EXISTS idx_activity_at   ON activity(at);
 """
 
+# Each category's own item fields. Keys "concentration", "source" and "lot" are stored in the item's
+# columns of the same name; every other key goes into items.extra. Types: text, longtext, number,
+# date, choice (with options). Editable per category under Settings.
+def _f(key, label, type="text", options=None):
+    d = {"key": key, "label": label, "type": type}
+    if options:
+        d["options"] = options
+    return d
+
+VESSELS = ["Cryovial", "10 cm plate", "6 cm plate", "15 cm plate", "6-well plate", "12-well plate",
+           "24-well plate", "96-well plate", "T25 flask", "T75 flask", "T175 flask"]
+RESISTANCE = ["Ampicillin", "Kanamycin", "Chloramphenicol", "Spectinomycin", "Tetracycline", "Zeocin", "Other"]
+
+DEFAULT_CATEGORY_FIELDS = {
+    "Primers": [_f("sequence", "Sequence (5'→3')", "longtext"), _f("direction", "Direction", "choice", ["Forward", "Reverse", "Probe", "Pair"]),
+                _f("target", "Target gene"), _f("species", "Species / animal"), _f("concentration", "Concentration"),
+                _f("tm", "Tm (°C)", "number"), _f("source", "Supplier")],
+    "Cells": [_f("date_frozen", "Date frozen", "date"), _f("passage", "Passage number", "number"),
+              _f("vessel", "Vessel size", "choice", VESSELS), _f("cells_per_vial", "Cells per vial"),
+              _f("species", "Species"), _f("genotype", "Genotype / modification"), _f("medium", "Freezing medium"),
+              _f("source", "Source")],
+    "Antibodies": [_f("source", "Brand"), _f("catalog", "Catalog number"), _f("host", "Host species"),
+                   _f("target", "Target"), _f("clone", "Clone"), _f("conjugate", "Conjugate / fluorophore"),
+                   _f("isotype", "Isotype"), _f("concentration", "Concentration"), _f("lot", "Lot")],
+    "Plasmids": [_f("backbone", "Backbone"), _f("insert", "Insert"), _f("resistance", "Resistance", "choice", RESISTANCE),
+                 _f("concentration", "Concentration"), _f("addgene", "Addgene / plasmid ID"),
+                 _f("verified", "Sequence verified", "choice", ["Yes", "No"]), _f("source", "Source")],
+    "Glycerol stocks": [_f("strain", "Bacterial strain"), _f("plasmid", "Plasmid"), _f("resistance", "Resistance", "choice", RESISTANCE),
+                        _f("date_made", "Date made", "date"), _f("source", "Source")],
+    "DNA": [_f("sample", "Source sample"), _f("concentration", "Concentration"), _f("ratio", "A260/280", "number"),
+            _f("date_extracted", "Date extracted", "date")],
+    "RNA": [_f("sample", "Source sample"), _f("concentration", "Concentration"), _f("ratio", "A260/280", "number"),
+            _f("rin", "RIN", "number"), _f("date_extracted", "Date extracted", "date")],
+    "Protein": [_f("concentration", "Concentration"), _f("buffer", "Buffer"), _f("tag", "Tag"),
+                _f("date_purified", "Date purified", "date"), _f("source", "Source")],
+    "Tissue": [_f("species", "Species"), _f("tissue", "Tissue"), _f("animal_id", "Animal ID"),
+               _f("date_collected", "Date collected", "date"), _f("preservation", "Preservation", "choice", ["Snap frozen", "OCT", "RNAlater", "Fixed", "Other"])],
+    "Serum / plasma": [_f("species", "Species"), _f("animal_id", "Animal / donor ID"), _f("date_collected", "Date collected", "date"),
+                       _f("anticoagulant", "Anticoagulant")],
+    "Reagents": [_f("source", "Brand"), _f("catalog", "Catalog number"), _f("lot", "Lot"), _f("concentration", "Concentration")],
+    "Other": [_f("source", "Source"), _f("lot", "Lot"), _f("concentration", "Concentration")],
+}
+
 DEFAULT_CONTAINER_TYPES = ["Box", "Freezing cylinder", "Bag", "Canister", "Tray"]
 
 DEFAULT_CATEGORIES = [
+    ("Primers", "#0ea5e9"),
     ("Cells", "#e4572e"),
     ("Plasmids", "#3b82f6"),
     ("Antibodies", "#8b5cf6"),
@@ -304,6 +350,12 @@ def _home_loose_items(conn):
 def init_db():
     conn = get_conn()
     conn.executescript(SCHEMA)
+    ccols = {r[1] for r in conn.execute("PRAGMA table_info(categories)")}
+    if "fields" not in ccols:
+        conn.execute("ALTER TABLE categories ADD COLUMN fields TEXT")
+    icols = {r[1] for r in conn.execute("PRAGMA table_info(items)")}
+    if "extra" not in icols:
+        conn.execute("ALTER TABLE items ADD COLUMN extra TEXT")
     # Lightweight migrations for databases created by older versions.
     cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
     if "span" not in cols:
@@ -335,6 +387,18 @@ def init_db():
                 (p["name"], p["type"], p["manufacturer"], p["device_name"], p["model"], p.get("size"),
                  json.dumps(p["layout"]), json.dumps(p["plan"]) if p.get("plan") else None, p.get("notes")))
         conn.execute("INSERT INTO settings (key, value) VALUES ('presets_seeded', '1')")
+    # A brand-new lab gets the default categories first.
+    if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
+        conn.executemany(
+            "INSERT INTO categories (name, color, sort) VALUES (?, ?, ?)",
+            [(n, c, i) for i, (n, c) in enumerate(DEFAULT_CATEGORIES)])
+    # One-time: give the built-in categories their field sets, and add Primers if it's missing.
+    if not conn.execute("SELECT 1 FROM settings WHERE key = 'category_fields_seeded'").fetchone():
+        if not conn.execute("SELECT 1 FROM categories WHERE name = 'Primers'").fetchone():
+            conn.execute("INSERT INTO categories (name, color, sort) VALUES ('Primers', '#0ea5e9', -1)")
+        for name, fields in DEFAULT_CATEGORY_FIELDS.items():
+            conn.execute("UPDATE categories SET fields = ? WHERE name = ? AND fields IS NULL", (json.dumps(fields), name))
+        conn.execute("INSERT INTO settings (key, value) VALUES ('category_fields_seeded', '1')")
     _flatten_ln2(conn)
     _home_loose_items(conn)
     # Labs set up before lab codes existed get one now (an admin can change it in Settings).
@@ -343,8 +407,4 @@ def init_db():
         alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
         conn.execute("INSERT INTO settings (key, value) VALUES ('join_code', ?)",
                      ("".join(secrets.choice(alphabet) for _ in range(6)),))
-    if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
-        conn.executemany(
-            "INSERT INTO categories (name, color, sort) VALUES (?, ?, ?)",
-            [(n, c, i) for i, (n, c) in enumerate(DEFAULT_CATEGORIES)])
     conn.commit()

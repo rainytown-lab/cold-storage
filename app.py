@@ -48,7 +48,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 14
+API_VERSION = 15
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -598,11 +598,44 @@ def delete_container_type(ctx):
     return {"ok": True}
 
 
+FIELD_TYPES = ("text", "longtext", "number", "date", "choice")
+COLUMN_FIELDS = ("concentration", "source", "lot")   # stored in the item's own columns, not in extra
+
+
+def clean_fields(raw):
+    """Validate a category's field list: [{key, label, type, options?}, …]."""
+    require(isinstance(raw, list) and len(raw) <= 40, "Up to 40 fields per category")
+    out, keys = [], set()
+    for f in raw:
+        require(isinstance(f, dict), "Bad field")
+        label = text(f, "label", 60)
+        require(label, "Every field needs a name")
+        key = re.sub(r"[^a-z0-9_]", "", (f.get("key") or re.sub(r"\W+", "_", label.lower())).lower())[:40] or "field"
+        base, i = key, 2
+        while key in keys:
+            key, i = f"{base}_{i}", i + 1
+        keys.add(key)
+        ftype = f.get("type") if f.get("type") in FIELD_TYPES else "text"
+        d = {"key": key, "label": label, "type": ftype}
+        if ftype == "choice":
+            opts = [str(o).strip()[:60] for o in (f.get("options") or []) if str(o).strip()][:40]
+            require(opts, f"“{label}” is a choice — give it some options")
+            d["options"] = opts
+        out.append(d)
+    return out
+
+
+def _category_out(c):
+    c = dict(c)
+    c["fields"] = json.loads(c["fields"]) if c.get("fields") else []
+    return c
+
+
 @route("GET", "/api/categories")
 def list_categories(ctx):
-    return rows(ctx["conn"].execute("""
+    return [_category_out(c) for c in rows(ctx["conn"].execute("""
         SELECT c.*, (SELECT COUNT(*) FROM items i WHERE i.category_id = c.id AND i.status='stored') AS stored
-        FROM categories c ORDER BY sort, name COLLATE NOCASE"""))
+        FROM categories c ORDER BY sort, name COLLATE NOCASE"""))]
 
 
 @route("POST", "/api/categories")
@@ -613,8 +646,9 @@ def create_category(ctx):
     require(not conn.execute("SELECT 1 FROM categories WHERE name = ?", (name,)).fetchone(),
             "That category already exists")
     sort = conn.execute("SELECT COALESCE(MAX(sort), 0) + 1 FROM categories").fetchone()[0]
-    cur = conn.execute("INSERT INTO categories (name, color, sort) VALUES (?,?,?)",
-                       (name, _color(b), sort))
+    fields = clean_fields(b["fields"]) if "fields" in b else [{"key": k, "label": k.capitalize(), "type": "text"} for k in COLUMN_FIELDS]
+    cur = conn.execute("INSERT INTO categories (name, color, sort, fields) VALUES (?,?,?,?)",
+                       (name, _color(b), sort, json.dumps(fields)))
     conn.commit()
     return {"id": cur.lastrowid}
 
@@ -623,11 +657,17 @@ def create_category(ctx):
 def update_category(ctx):
     conn, b = ctx["conn"], ctx["body"]
     cid = as_int(ctx["params"]["id"], "id")
+    cur = one(conn.execute("SELECT * FROM categories WHERE id = ?", (cid,)))
+    require(cur, "Not found", 404)
+    if "name" not in b:
+        b = dict(b, name=cur["name"], color=b.get("color", cur["color"]))
     name = text(b, "name", 80)
     require(name, "Name is required")
     dup = conn.execute("SELECT 1 FROM categories WHERE name = ? AND id != ?", (name, cid)).fetchone()
     require(not dup, "That category already exists")
     conn.execute("UPDATE categories SET name = ?, color = ? WHERE id = ?", (name, _color(b), cid))
+    if "fields" in b:
+        conn.execute("UPDATE categories SET fields = ? WHERE id = ?", (json.dumps(clean_fields(b["fields"])), cid))
     conn.commit()
     return {"ok": True}
 
@@ -1433,6 +1473,12 @@ def _item_values(conn, b, partial=False):
                  ("notes", 4000), ("loose_where", 120)):
         if not partial or k in b:
             out[k] = text(b, k, n)
+    if not partial or "extra" in b:
+        raw = b.get("extra") or {}
+        require(isinstance(raw, dict) and len(raw) <= 40, "Bad details")
+        clean = {re.sub(r"[^a-z0-9_]", "", str(k).lower())[:40]: str(v).strip()[:2000] for k, v in raw.items()
+                 if str(v or "").strip()}
+        out["extra"] = json.dumps(clean) if clean else None
     if not partial or "expiry_date" in b:
         out["expiry_date"] = as_date(b.get("expiry_date"), "Expiry date")
     if not partial or "date_added" in b:
@@ -1518,7 +1564,7 @@ def update_item(ctx):
     if changed:
         conn.execute(f"UPDATE items SET {', '.join(k + ' = ?' for k in changed)}, updated_at = datetime('now') WHERE id = ?",
                      (*[vals[k] for k in changed], iid))
-        nice = ", ".join(k.replace("_id", "").replace("_", " ") for k in changed)
+        nice = ", ".join("details" if k == "extra" else k.replace("_id", "").replace("_", " ") for k in changed)
         log(ctx, "item.edit", f"Edited “{vals.get('name', old['name'])}” ({nice})", item_id=iid, unit_id=old["unit_id"])
     conn.commit()
     return {"ok": True}
@@ -1643,6 +1689,8 @@ def _search(ctx):
             hay = " ".join(str(it.get(k) or "") for k in (
                 "name", "notes", "source", "lot", "concentration", "quantity", "category_name",
                 "loose_where", "removal_reason")).lower()
+            if it.get("extra"):
+                hay += " " + " ".join(json.loads(it["extra"]).values()).lower()
             hay += " " + it["location"]["text"].lower() + " " + (users.get(eo, "").lower())
             if not all(t in hay for t in tokens):
                 continue
@@ -1663,13 +1711,18 @@ def export_items(ctx):
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["ID", "Name", "Category", "Owner", "Location", "Position", "Quantity", "Concentration",
-                "Source", "Lot", "Expiry", "Date added", "Status", "Date removed", "Removal reason", "Notes"])
+                "Source", "Lot", "Expiry", "Date added", "Status", "Date removed", "Removal reason", "Notes", "Details"])
+    labels = {}
+    for c in rows(ctx["conn"].execute("SELECT id, fields FROM categories")):
+        labels[c["id"]] = {f["key"]: f["label"] for f in (json.loads(c["fields"]) if c["fields"] else [])}
     for it in out:
         own = "Common" if it["eff_common"] else users.get(it["eff_owner_id"], "")
         w.writerow([it["id"], it["name"], it.get("category_name") or "", own, it["location"]["text"],
                     it["location"]["pos"] or "", it["quantity"] or "", it["concentration"] or "",
                     it["source"] or "", it["lot"] or "", it["expiry_date"] or "", it["date_added"],
-                    it["status"], it["date_removed"] or "", it["removal_reason"] or "", it["notes"] or ""])
+                    it["status"], it["date_removed"] or "", it["removal_reason"] or "", it["notes"] or "",
+                    "; ".join(f"{labels.get(it['category_id'], {}).get(k, k)}: {v}"
+                              for k, v in (json.loads(it["extra"]) if it.get("extra") else {}).items())])
     return ("text/csv; charset=utf-8", buf.getvalue().encode("utf-8-sig"),
             f"cold-storage-{today()}.csv")
 
@@ -1754,7 +1807,7 @@ def lowerfirst(t):
 
 ITEM_RESTORE_COLS = ("unit_id", "node_id", "pos_row", "pos_col", "loose_where", "name", "category_id", "owner_id",
                      "is_common", "quantity", "concentration", "source", "lot", "expiry_date", "notes", "status",
-                     "date_added", "date_removed", "removed_by", "removal_reason", "last_location")
+                     "date_added", "date_removed", "removed_by", "removal_reason", "last_location", "extra")
 UNIT_RESTORE_COLS = ("name", "location", "size", "manufacturer", "device_name", "model", "serial_number",
                      "inventory_number", "last_defrost", "last_pm", "notes", "owner_id", "is_common", "plan")
 
@@ -1782,7 +1835,7 @@ def _apply_undo(conn, u, row):
                                      " AND id != ?", (before["node_id"], before["pos_row"], before["pos_col"], iid)).fetchone()
                 require(not taken, f"Its old position is now taken by “{taken[0] if taken else ''}”", 409)
         conn.execute(f"UPDATE items SET {', '.join(c + ' = ?' for c in ITEM_RESTORE_COLS)}, updated_at = datetime('now') WHERE id = ?",
-                     (*[before[c] for c in ITEM_RESTORE_COLS], iid))
+                     (*[before.get(c) for c in ITEM_RESTORE_COLS], iid))
     elif kind == "layout":
         uid = u["unit_id"]
         require(conn.execute("SELECT 1 FROM units WHERE id = ?", (uid,)).fetchone(), "That storage unit no longer exists")
