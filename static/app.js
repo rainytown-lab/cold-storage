@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 13;   // must match API_VERSION in app.py
+const API_VERSION = 14;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space', bin: 'Container' };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
 // Levels per storage type. LN2 tanks have no shelves or rows: racks stand in the tank and
@@ -528,7 +528,7 @@ function showSetup() {
 // Home
 // ------------------------------------------------------------------------ //
 async function viewHome() {
-  const [units, feed] = await Promise.all([api('GET', '/api/units'), api('GET', '/api/activity?limit=12')]);
+  const [units, feed] = await Promise.all([api('GET', '/api/units?layout=1'), api('GET', '/api/activity?limit=12')]);
   const groups = new Map();
   for (const u of units) {
     const k = u.location || 'No location set';
@@ -547,23 +547,51 @@ async function viewHome() {
       h('div', { class: 'card-head' }, h('h2', null, 'Recent activity'), h('a', { href: '#/activity', class: 'small' }, 'Full log →')),
       feedList(feed)));
 }
+/** A little drawing of a unit's set-up for the Storage page (same style as the "you are here" map):
+ *  a portrait freezer of shelves with their racks and loose spaces, or a tank seen from above. */
+function miniMap(u) {
+  const holders = u.mini || [];
+  if (u.type === 'ln2') {
+    const pieces = (holders[0] || []).map(([k, w, pos]) => ({ level: k === 's' ? 'space' : 'rack', span: w, position: pos }));
+    const plan = unitPlan(u);
+    let shapes = '';
+    if (planFits(plan, pieces)) {
+      const { pos, size } = planGeom(plan, 50, 44);
+      const byPos = new Map(pieces.map(p => [p.position, p]));
+      shapes = (plan.dividers ? '<line class="divider" x1="50" y1="6" x2="50" y2="94"/><line class="divider" x1="6" y1="50" x2="94" y2="50"/>' : '')
+        + plan.slots.map((sl, i) => { const [x, y] = pos(sl), p = byPos.get(i);
+          return `<rect class="${p ? (p.level === 'space' ? 'space' : '') : 'empty'}" x="${(x - size / 2).toFixed(1)}" y="${(y - size / 2).toFixed(1)}" width="${size.toFixed(1)}" height="${size.toFixed(1)}" rx="1.5"/>`; }).join('');
+    } else {
+      const n = pieces.length;
+      const r = Math.max(3, Math.min(9, n ? 70 / n : 9));
+      shapes = pieces.map((p, i) => {
+        const R = n <= 1 ? 0 : n <= 4 ? 20 : 28, a = -Math.PI / 2 + 2 * Math.PI * i / Math.max(n, 1);
+        return `<circle class="${p.level === 'space' ? 'space' : ''}" cx="${(50 + R * Math.cos(a)).toFixed(1)}" cy="${(50 + R * Math.sin(a)).toFixed(1)}" r="${r}"/>`;
+      }).join('');
+    }
+    return h('div', { class: 'loc-map unit-mini', html: `<svg viewBox="0 0 100 100" class="loc-dewar"><circle class="wall" cx="50" cy="50" r="48"/>${shapes}</svg>` });
+  }
+  if (!holders.length) return h('div', { class: 'loc-map loc-cab unit-mini' }, h('div', { class: 'loc-shelf' }, h('i', { class: 'loc-cell empty' })));
+  return h('div', { class: 'loc-map loc-cab unit-mini' }, holders.map(pieces =>
+    h('div', { class: 'loc-shelf' }, pieces.length
+      ? pieces.map(([k, w]) => h('i', { class: 'loc-cell' + (k === 's' ? ' space' : ''), style: { flex: `${w} 1 0` } }))
+      : h('i', { class: 'loc-cell empty' }))));
+}
 function unitCard(u) {
   const t = TYPES[u.type];
   const boxed = u.stored - u.loose;
   const pct = u.capacity ? Math.min(100, Math.round(100 * boxed / u.capacity)) : 0;
-  const defrostOld = u.type !== 'ln2' && daysSince(u.last_defrost) > 365;
-  const pmOld = daysSince(u.last_pm) > 365;
+  const contents = [u.capacity ? `${boxed.toLocaleString()} / ${u.capacity.toLocaleString()} positions` : null,
+                    u.loose ? plural(u.loose, 'loose item') : null].filter(Boolean).join(' · ') || 'Empty';
   return h('a', { class: `unit-card ${t.cls}`, href: `#/unit/${u.id}` },
-    h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('span', { class: 'small muted' }, t.label), h('span', { class: 'spacer' }),
-      ownerChip(u.owner_id, u.is_common, { short: true })),
-    h('h2', null, u.name),
-    h('div', { class: 'meta' }, [u.device_name || u.manufacturer, u.model].filter(Boolean).join(' ') || u.size || ''),
-    h('div', { class: 'fillbar' }, h('i', { style: { width: pct + '%' } })),
-    h('div', { class: 'meta row' }, h('span', null, `${boxed.toLocaleString()} / ${u.capacity.toLocaleString()} positions · ${plural(u.box_count, 'box')}`.replace('boxs', 'boxes')),
-      u.loose ? h('span', { class: 'pill' }, `${u.loose} loose`) : null),
-    (u.last_defrost || u.last_pm || defrostOld || pmOld) ? h('div', { class: 'meta row', style: { marginTop: '6px' } },
-      u.type !== 'ln2' ? h('span', { class: 'pill' + (defrostOld ? ' warn' : '') }, 'Defrost ' + (u.last_defrost ? ago(u.last_defrost) : 'not logged')) : null,
-      h('span', { class: 'pill' + (pmOld ? ' warn' : '') }, 'PM ' + (u.last_pm ? ago(u.last_pm) : 'not logged'))) : null);
+    miniMap(u),
+    h('div', { class: 'unit-card-body' },
+      h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('span', { class: 'small muted type-label' }, t.label), h('span', { class: 'spacer' }),
+        ownerChip(u.owner_id, u.is_common, { short: true })),
+      h('h2', null, u.name),
+      h('div', { class: 'meta model' }, [u.device_name || u.manufacturer, u.model].filter(Boolean).join(' ') || u.size || ''),
+      u.capacity ? h('div', { class: 'fillbar' }, h('i', { style: { width: pct + '%' } })) : null,
+      h('div', { class: 'meta contents' }, contents)));
 }
 function feedList(feed) {
   if (!feed.length) return h('p', { class: 'empty-note' }, 'Nothing has happened yet.');

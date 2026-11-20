@@ -671,3 +671,35 @@ h1 { font-size: 26px; font-weight: 750; }
 .mode-opt span { font-size: 12px; color: var(--text-soft); }
 .mode-opt.on { border-color: var(--primary); background: var(--primary-soft); }
 @media (max-width: 560px) { .mode-pick { grid-template-columns: 1fr; } }
+
+/* ---------- Storage page cards: mini diagram + details ---------- */
+.unit-card { display: flex; gap: 14px; align-items: flex-start; }
+.unit-card-body { flex: 1; min-width: 0; }
+.unit-card h2 { overflow-wrap: anywhere; }
+.unit-card .unit-mini { flex: none; width: 52px; pointer-events: none; }
+.unit-card .unit-mini.loc-cab { aspect-ratio: 3 / 5; }
+.unit-card .loc-dewar { width: 56px; height: 56px; }
+.unit-card .loc-dewar circle:not(.wall) { fill: var(--surface-3); stroke: var(--steel-dark); stroke-width: .8; }
+.unit-card .loc-dewar circle.space, .unit-card .loc-dewar rect.space { fill: var(--surface); stroke-dasharray: 2 1.5; }
+.unit-card .loc-dewar rect { fill: var(--surface-3); stroke: var(--steel-dark); stroke-width: .6; }
+.unit-card .loc-dewar rect.empty { fill: transparent; stroke-dasharray: 1.5 1; }
+.unit-card .fillbar { margin: 10px 0 6px; }
+
+/* Phone: compact tiles, two per row — diagram on top, name and a fill bar underneath */
+@media (max-width: 720px) {
+  .units { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .unit-card { flex-direction: column; align-items: stretch; gap: 8px; padding: 12px 12px 10px 14px; }
+  .unit-card .unit-mini { align-self: center; width: 44px; }
+  .unit-card .loc-dewar { width: 52px; height: 52px; }
+  .unit-card .type-label, .unit-card .model, .unit-card .chip { display: none; }
+  .unit-card h2 { font-size: 15px; margin: 4px 0 0; }
+  .unit-card .fillbar { margin: 6px 0 4px; height: 5px; }
+  .unit-card .contents { font-size: 11.5px; }
+  .unit-card.add { min-height: 120px; grid-column: span 2; }
+}
+@media (max-width: 720px) {
+  #topbar { row-gap: 8px; }
+  #quick-search { flex: 1; min-width: 0; }
+  #quick-search input { width: 100%; }
+  #me-box .btn { padding: 5px 8px; }
+}

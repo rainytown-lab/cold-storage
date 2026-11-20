@@ -48,7 +48,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 13
+API_VERSION = 14
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -706,7 +706,35 @@ UNIT_LIST_SQL = """
 
 @route("GET", "/api/units")
 def list_units(ctx):
-    return rows(ctx["conn"].execute(UNIT_LIST_SQL + " ORDER BY u.location COLLATE NOCASE, u.name COLLATE NOCASE"))
+    units = rows(ctx["conn"].execute(UNIT_LIST_SQL + " ORDER BY u.location COLLATE NOCASE, u.name COLLATE NOCASE"))
+    if ctx["query"].get("layout"):
+        mini = _mini_layouts(ctx["conn"])
+        for u in units:
+            u["mini"] = mini.get(u["id"], [])
+    return units
+
+
+def _mini_layouts(conn):
+    """For the Storage page's little diagrams: per unit, its shelves (or, for a tank, the tank) as
+    lists of [kind, width, position] — kind "r" = rack, "s" = loose space. Nothing deeper."""
+    nodes = rows(conn.execute("SELECT id, unit_id, parent_id, level, position, span FROM nodes "
+                              "WHERE level IN ('shelf', 'rack', 'space') ORDER BY position, id"))
+    by_id = {n["id"]: n for n in nodes}
+    out = defaultdict(dict)                  # unit -> holder id (None = tank) -> pieces
+    for n in nodes:
+        if n["level"] == "shelf":
+            out[n["unit_id"]].setdefault(n["id"], [])
+    for n in nodes:
+        if n["level"] == "shelf":
+            continue
+        parent = by_id.get(n["parent_id"]) if n["parent_id"] else None
+        if n["parent_id"] and (not parent or parent["level"] != "shelf"):
+            continue                         # spaces inside racks/rows aren't drawn here
+        out[n["unit_id"]].setdefault(n["parent_id"], []).append(
+            ["s" if n["level"] == "space" else "r", n["span"] or 1, n["position"]])
+    shelf_order = {n["id"]: (n["position"], n["id"]) for n in nodes if n["level"] == "shelf"}
+    return {uid: [holders[h] for h in sorted(holders, key=lambda h: shelf_order.get(h, (-1, 0)))]
+            for uid, holders in out.items()}
 
 
 @route("POST", "/api/units")
