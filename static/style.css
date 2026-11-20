@@ -419,3 +419,11 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
   .rack-tile .lbl, .box-tile .lbl { font-size: 10px; }
   .tile-sub { font-size: 9.5px; }
 }
+
+/* Drag & drop for boxes, and the "server out of date" warning */
+[data-dnd] .box-tile { cursor: grab; }
+.box-tile.drop-before { box-shadow: -4px 0 0 0 var(--primary); }
+.box-tile.drop-after { box-shadow: 4px 0 0 0 var(--primary); }
+.rack-row.drop-into { outline: 2px dashed var(--primary); outline-offset: 2px; }
+.outdated { position: sticky; top: 0; z-index: 30; background: var(--danger); color: #fff; padding: 10px 24px; font-size: 14px; }
+.outdated code { background: rgba(0,0,0,.25); padding: 1px 6px; border-radius: 5px; }

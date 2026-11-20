@@ -19,6 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
+const API_VERSION = 3;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
 const CHILD = { shelf: 'rack', rack: 'row', row: 'box', box: null, space: null };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
@@ -114,6 +115,11 @@ async function api(method, path, body) {
     state.me = null;
     showAuth();
     throw new Error(data.error || 'Please sign in');
+  }
+  if (r.status === 404 && data.error === 'Not found') {
+    // The page knows an endpoint the server doesn't: the server is running older code.
+    serverOutdated();
+    throw new Error('The server is running an older version — restart it to use this.');
   }
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
   return data;
@@ -312,7 +318,7 @@ function dndEnd(commit) {
   const i = sibs.indexOf(st.id);
   if (st.target.parent === st.fromParent && (st.target.before === sibs[i + 1] || (st.target.before === null && i === sibs.length - 1))) return;
   attempt(() => api('POST', `/api/nodes/${st.id}/place`, { parent_id: st.target.parent, before_id: st.target.before }))
-    .then(r => { if (r) toast(r.renamed ? `Moved — renamed to “${r.renamed}” (name was taken on that shelf)` : 'Moved'); refresh(); });
+    .then(r => { if (r) toast(r.renamed ? `Moved — renamed to “${r.renamed}” (that name was already taken there)` : 'Moved'); refresh(); });
 }
 document.addEventListener('pointerdown', e => {
   if (e.button !== 0 || dnd.st) return;
@@ -345,6 +351,13 @@ document.addEventListener('touchmove', e => { if (dnd.st && dnd.st.active) e.pre
 // Long-press would otherwise open the browser's context menu / link preview.
 document.addEventListener('contextmenu', e => { if (dnd.st) e.preventDefault(); });
 
+function serverOutdated() {
+  if ($('#outdated')) return;
+  document.body.prepend(h('div', { id: 'outdated', class: 'outdated' },
+    h('b', null, 'The Cold Storage server is out of date.'),
+    ' This page was updated but the server process wasn\'t restarted, so newer actions (moving, converting…) will fail. ',
+    'In the terminal running it press Ctrl-C, then run ', h('code', null, 'python3 app.py'), ' again and reload this page.'));
+}
 function renderBanner() {
   const b = $('#banner');
   if (!state.moving) { b.hidden = true; return; }
@@ -361,6 +374,7 @@ function renderBanner() {
 async function boot() {
   const st = await fetch('/api/status').then(r => r.json());
   state.lab = st.lab_name;
+  if (st.api_version !== API_VERSION) serverOutdated();
   if (st.needs_setup) return showSetup();
   try {
     const me = await api('GET', '/api/me');
@@ -783,7 +797,7 @@ function shelfView(m, shelf) {
 }
 function boxTile(m, b, big = false) {
   const s = stats(m, b.id);
-  return h('div', { class: 'box-tile' + (big ? ' big' : '') + (nodeMatches(m, b.id) ? '' : ' dim'), 'data-href': nodeHref(m, b.id),
+  return h('div', { class: 'box-tile' + (big ? ' big' : '') + (nodeMatches(m, b.id) ? '' : ' dim'), 'data-href': nodeHref(m, b.id), 'data-drag': b.id,
       title: `${nodeLabel(b)} — ${s.used}/${s.cap} positions filled (${b.grid_rows}×${b.grid_cols})` },
     h('div', { class: 'lbl' }, h('span', null, nodeLabel(b))),
     h('div', { class: 'tile-sub' }, `${s.used}/${s.cap}`),
@@ -794,7 +808,7 @@ function rackView(m, rack) {
   if (!rowsN.length) return h('div', { class: 'card empty-note' }, 'This rack has no rows yet — add rows from the panel.');
   return h('div', { class: 'rack-frame' }, rowsN.map(r => {
     const s = stats(m, r.id);
-    return h('div', { class: 'rack-row' + (nodeMatches(m, r.id) ? '' : ' dim') },
+    return h('div', { class: 'rack-row' + (nodeMatches(m, r.id) ? '' : ' dim'), 'data-drop-parent': r.id },
       h('div', { class: 'row-lbl', 'data-href': nodeHref(m, r.id), title: 'Open row' }, nodeLabel(r), h('small', null, `${s.used}/${s.cap}`)),
       h('div', { class: 'row-boxes' }, kidsOf(m, r.id).length ? kidsOf(m, r.id).map(b => boxTile(m, b)) : h('span', { class: 'faint small', style: { alignSelf: 'center' } }, 'no boxes')));
   }));
@@ -802,7 +816,9 @@ function rackView(m, rack) {
 function rowView(m, row) {
   const boxes = kidsOf(m, row.id);
   if (!boxes.length) return h('div', { class: 'card empty-note' }, 'This row has no boxes yet — add boxes from the panel.');
-  return h('div', { class: 'rack-frame' }, h('div', { class: 'rack-row' }, h('div', { class: 'row-boxes', style: { gap: '10px' } }, boxes.map(b => boxTile(m, b, true)))));
+  return h('div', null,
+    h('div', { class: 'rack-frame' }, h('div', { class: 'rack-row', 'data-drop-parent': row.id }, h('div', { class: 'row-boxes', style: { gap: '10px' } }, boxes.map(b => boxTile(m, b, true))))),
+    h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Drag boxes to reorder them (long-press on a phone). Open the rack to move a box to another row.'));
 }
 
 // ---------- Box view ----------
@@ -958,7 +974,7 @@ function nodeSide(m, node) {
         node.level === 'space' ? h('span', { class: 'small muted' }, plural(looseCount(m, node.id), 'item')) : h('span', { class: 'small muted' }, `${s.used}/${s.cap} filled`)),
       form),
     node.level === 'shelf' || node.level === 'space' ? looseCard(m, node) : null,
-    node.level === 'rack' || node.level === 'space' ? placeCard(m, node) : null,
+    node.level === 'rack' || node.level === 'space' || node.level === 'box' ? placeCard(m, node) : null,
     h('div', { class: 'card' },
       h('div', { class: 'row' },
         child ? h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, node) }, `+ Add ${LEVEL[child].toLowerCase()}s`) : null,
@@ -974,8 +990,11 @@ function nodeSide(m, node) {
 function placeCard(m, node) {
   const sibs = kidsOf(m, node.parent_id);
   const i = sibs.findIndex(x => x.id === node.id);
-  const shelves = kidsOf(m, null);
-  const shelfSel = h('select', { class: 'input' }, shelves.map(sh => h('option', { value: sh.id }, nodeLabel(sh))));
+  const isBox = node.level === 'box';
+  // Racks/spaces can go to any shelf; a box to any row of its rack.
+  const parents = isBox ? kidsOf(m, m.nodes.get(node.parent_id).parent_id) : kidsOf(m, null);
+  const shelves = parents;
+  const shelfSel = h('select', { class: 'input' }, parents.map(sh => h('option', { value: sh.id }, nodeLabel(sh))));
   shelfSel.value = String(node.parent_id);
   shelfSel.onchange = () => placeNode(m, node, +shelfSel.value, null);
   return h('div', { class: 'card' },
@@ -983,13 +1002,13 @@ function placeCard(m, node) {
     h('div', { class: 'row' },
       h('button', { class: 'btn sm', disabled: i === 0, onclick: () => placeNode(m, node, node.parent_id, sibs[i - 1].id) }, '◀ Move left'),
       h('button', { class: 'btn sm', disabled: i === sibs.length - 1, onclick: () => placeNode(m, node, node.parent_id, sibs[i + 2] ? sibs[i + 2].id : null) }, 'Move right ▶')),
-    shelves.length > 1 ? field('Shelf', shelfSel, 'moves it to the end of that shelf') : null,
+    shelves.length > 1 ? field(isBox ? 'Row' : 'Shelf', shelfSel, `moves it to the end of that ${isBox ? 'row' : 'shelf'}`) : null,
     h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Or drag it in the diagram (long-press on a phone).'));
 }
 async function placeNode(m, node, parentId, beforeId) {
   const r = await attempt(() => api('POST', `/api/nodes/${node.id}/place`, { parent_id: parentId, before_id: beforeId }));
   if (!r) return refresh();
-  toast(r.renamed ? `Moved — renamed to “${r.renamed}” (name was taken on that shelf)` : 'Moved');
+  toast(r.renamed ? `Moved — renamed to “${r.renamed}” (that name was already taken there)` : 'Moved');
   refresh();
 }
 function addSpaceDialog(m, shelf) {

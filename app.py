@@ -35,6 +35,9 @@ LEVELS = ("shelf", "rack", "row", "box")
 LEVEL_LABEL = {"shelf": "Shelf", "rack": "Rack", "row": "Row", "box": "Box", "space": "Loose space"}
 SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
+
+# Bump when the API changes, so an already-open page can tell the server needs a restart.
+API_VERSION = 3
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -296,7 +299,8 @@ def _user_public(u):
 @route("GET", "/api/status", auth=False)
 def status(ctx):
     conn = ctx["conn"]
-    return {"needs_setup": conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0,
+    return {"api_version": API_VERSION,
+            "needs_setup": conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0,
             "lab_name": get_setting(conn, "lab_name", "Cold Storage")}
 
 
@@ -676,11 +680,11 @@ def delete_node(ctx):
     return {"ok": True}
 
 
-def _freeze_labels(conn, tree, shelf_ids):
-    """Give unnamed racks/spaces on these shelves their current label as a real name,
+def _freeze_labels(conn, tree, parent_ids):
+    """Give unnamed children of these parents their current label as a real name,
     so reordering doesn't silently renumber them (and the item paths that use them)."""
     for n in tree.nodes.values():
-        if n["parent_id"] in shelf_ids and n["level"] in SHELF_CHILDREN and not n["name"]:
+        if n["parent_id"] in parent_ids and not n["name"]:
             conn.execute("UPDATE nodes SET name = ? WHERE id = ?", (tree.label(n), n["id"]))
 
 
@@ -730,15 +734,18 @@ def convert_node(ctx):
 
 @route("POST", "/api/nodes/<id>/place")
 def place_node(ctx):
-    """Move a rack or loose space to another spot: {parent_id: shelf, before_id: sibling or null = end}."""
+    """Move a rack/loose space onto a shelf, or a box into a row:
+    {parent_id, before_id: sibling or null = end}. Items travel with their container."""
     conn, b = ctx["conn"], ctx["body"]
     nid = as_int(ctx["params"]["id"], "id")
     n = one(conn.execute("SELECT * FROM nodes WHERE id = ?", (nid,)))
-    require(n and n["level"] in SHELF_CHILDREN, "Only racks and loose spaces can be dragged")
-    shelf_id = as_int(b.get("parent_id"), "Shelf", allow_none=False)
-    shelf = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ? AND level = 'shelf'",
-                             (shelf_id, n["unit_id"])))
-    require(shelf, "Racks can only go on a shelf of the same storage unit")
+    require(n and (n["level"] in SHELF_CHILDREN or n["level"] == "box"), "Only racks, loose spaces and boxes can be moved")
+    parent_level = "row" if n["level"] == "box" else "shelf"
+    shelf_id = as_int(b.get("parent_id"), parent_level.capitalize(), allow_none=False)
+    shelf = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ? AND level = ?",
+                             (shelf_id, n["unit_id"], parent_level)))
+    require(shelf, "Boxes can only go into a row of the same storage unit" if parent_level == "row"
+            else "Racks can only go on a shelf of the same storage unit")
     before = as_int(b.get("before_id"), "before")
     tree = Tree(conn, n["unit_id"])
     _freeze_labels(conn, tree, {n["parent_id"], shelf_id})
