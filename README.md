@@ -60,10 +60,16 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   optional free-text spot ("door", "bottom bin"). Loose items left outside a loose
   space by older versions are moved into a new loose space on their shelf (or in
   the tank) when the server starts.
-- **Loose spaces**: a loose space is room on a shelf for bottles, bags and kits.
-  It sits in line with the racks and is 1–N rack-widths wide. Open an empty rack
-  and click "Replace with loose space" (or the reverse) to swap one for the other
-  in the same spot.
+- **Loose spaces**: a loose space is room for bottles, bags and kits. It can stand
+  wherever a rack, row or box would: on a shelf or in a tank (in place of racks), in
+  a freezer rack (in place of rows), or in a row or LN₂ rack (in place of boxes). It
+  is 1–N racks wide, rows high, or boxes wide. Any empty rack, row or box can be
+  replaced with a loose space ("Replace with loose space" on its page), and a loose
+  space can be turned back into whatever stands beside it.
+- **Same-size racks**: every rack in a unit is drawn at the same width, set by
+  the shelf with the most rack-widths. Spare room on other shelves shows as a
+  dashed "Empty" slot; click it to add a rack or a loose space there. Boxes in a
+  freezer rack are the same width across its rows too.
 - **Selecting several racks**: shift-click racks or loose spaces (or click "Select
   racks" and then click them) to select several on one shelf or in one tank.
   "Make loose space…" offers one loose space as wide as all of them (side-by-side

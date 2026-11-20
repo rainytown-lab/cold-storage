@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 10;   // must match API_VERSION in app.py
+const API_VERSION = 11;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
 // Levels per storage type. LN2 tanks have no shelves or rows: racks stand in the tank and
@@ -882,28 +882,55 @@ function rackTile(m, rack) {
   const s = stats(m, rack.id);
   return h('div', { class: 'rack-tile' + (nodeMatches(m, rack.id) ? '' : ' dim') + (state.pieceSel.ids.has(rack.id) ? ' picked' : ''), 'data-href': nodeHref(m, rack.id), 'data-drag': rack.id, 'data-piece': rack.id,
       title: `${nodeLabel(rack)} — ${s.used}/${s.cap} positions filled · drag to move` },
-    h('div', { class: 'lbl' }, h('span', null, nodeLabel(rack))),
+    h('div', { class: 'lbl' }, h('span', null, shortLabel(nodeLabel(rack)))),
     h('div', { class: 'tile-sub' }, s.cap ? Math.round(100 * frac(s)) + '% full' : 'empty'),
     fillGauge(s), ownerBar(rack));
+}
+/** "Rack 3" → "Rack " + "3", so narrow tiles can drop the word and keep the number. */
+function shortLabel(label) {
+  const mm = /^(Rack|Box|Loose space) (\d+)$/.exec(label);
+  if (!mm) return label;
+  return [h('span', { class: 'pfx' }, mm[1] + ' '), mm[1] === 'Loose space' ? h('span', { class: 'alt' }, 'L') : null, mm[2]];
 }
 function looseCount(m, nodeId) { return m.loose.filter(i => (i.node_id || 0) === (nodeId || 0)).length; }
 function spaceTile(m, sp) {
   const list = m.loose.filter(i => i.node_id === sp.id);
   const span = sp.span || 1;
   const match = !state.highlight || ownerMatch(nodeOwner(m, sp.id)) || list.some(it => ownerMatch(itemOwner(m, it)));
-  // flex-grow = span: a 2-wide space always takes the room of two racks, at any window width.
+  // --w = span: a 2-wide space is exactly two rack-widths (see .racks sizing in style.css).
   return h('div', { class: 'rack-tile space-tile' + (match ? '' : ' dim') + (state.pieceSel.ids.has(sp.id) ? ' picked' : ''), 'data-href': nodeHref(m, sp.id), 'data-drag': sp.id, 'data-piece': sp.id,
-      style: { flex: `${span} 1 0` },
+      style: { '--w': String(span) },
       title: `${nodeLabel(sp)} — ${plural(list.length, 'loose item')} · ${span} rack-width${span > 1 ? 's' : ''} · drag to move` },
-    h('div', { class: 'lbl' }, h('span', null, nodeLabel(sp))),
+    h('div', { class: 'lbl' }, h('span', null, shortLabel(nodeLabel(sp)))),
     h('div', { class: 'tile-sub' }, list.length ? plural(list.length, 'item') : 'empty'),
     ownerBar(sp));
 }
 const shelfPiece = (m, n) => n.level === 'space' ? spaceTile(m, n) : rackTile(m, n);
+const pieceWidth = p => p.level === 'space' ? (p.span || 1) : 1;
+/** Every rack in a unit is the same width: the shelf with the most rack-widths sets the scale. */
+function unitSlots(m) {
+  return Math.max(1, ...kidsOf(m, null).filter(s => s.level === 'shelf').map(sh => kidsOf(m, sh.id).reduce((a, p) => a + pieceWidth(p), 0)));
+}
+/** The rest of a shelf that holds no rack or loose space: click to fill it. */
+function freeSlot(m, holder, width) {
+  if (width <= 0) return null;
+  const kind = childLevel(m.unit.type, holder.level);
+  return h('div', { class: 'free-slot', style: { '--w': String(width) }, title: `Empty — click to add a ${LEVEL[kind].toLowerCase()} or loose space here`,
+    onclick: e => { e.stopPropagation(); fillFreeSlot(m, holder, width); } }, h('span', null, 'Empty'), h('b', null, '+'));
+}
+function fillFreeSlot(m, holder, width) {
+  const kind = childLevel(m.unit.type, holder.level);
+  const close = openModal({ title: `Fill the empty space in ${nodeLabel(holder)}`,
+    body: h('div', { class: 'stack' }, h('p', { class: 'small muted' }, `There’s room for ${width} more ${width === 1 ? LEVEL[kind].toLowerCase() : levelPlural(kind)} here.`),
+      h('div', { class: 'row' },
+        h('button', { class: 'btn primary', onclick: () => { close(); addChildrenDialog(m, holder, width); } }, `+ Add ${width === 1 ? LEVEL[kind].toLowerCase() : levelPlural(kind)}`),
+        h('button', { class: 'btn', onclick: () => { close(); addSpaceDialog(m, holder, width); } }, '+ Add loose space'))) });
+}
 
 
 function cabinetView(m) {
   const shelves = kidsOf(m, null);
+  const slots = unitSlots(m);
   const t = TYPES[m.unit.type];
   return h('div', { class: 'cabinet' },
     h('div', { class: 'cabinet-top' }, h('span', { class: 'display' }, t.temp), h('span', { class: 'nm' }, m.unit.name),
@@ -912,12 +939,12 @@ function cabinetView(m) {
       shelves.length ? shelves.map(sh => {
         const racks = kidsOf(m, sh.id);
         const lc = looseCount(m, sh.id);
+        const used = racks.reduce((a, p) => a + pieceWidth(p), 0);
         return h('div', { class: 'shelf', 'data-drop-parent': sh.id },
           h('div', { class: 'shelf-head' }, h('a', { href: nodeHref(m, sh.id) }, nodeLabel(sh)),
             ownerChip(sh.owner_id, sh.is_common, { short: true }), lc ? h('span', { class: 'pill' }, `${lc} loose`) : null),
-          racks.length ? h('div', { class: 'racks' }, racks.map(r => shelfPiece(m, r)))
-            : h('div', { class: 'racks empty-shelf' }, h('span', null, 'Empty shelf — ', h('a', { href: nodeHref(m, sh.id) }, 'open it'), ' to add racks or a loose space, or drop a rack here')));
-      }) : h('div', { class: 'empty-note' }, 'No shelves yet — add one from the panel on the right.')));
+          h('div', { class: 'racks', style: { '--slots': String(slots) } }, racks.map(r => shelfPiece(m, r)), freeSlot(m, sh, slots - used)));
+      }) : h('div', { class: 'empty-note' }, 'No shelves yet — add one under Details › Edit.')));
 }
 // ---------- Arranged tanks (racks in fixed compartment slots, e.g. CryoExtra CE8120) ----------
 function unitPlan(unit) {
@@ -1028,16 +1055,32 @@ function shelfView(m, shelf) {
   const racks = kidsOf(m, shelf.id);
   return h('div', null,
     h('div', { class: 'cabinet' }, h('div', { class: 'cabinet-inner' }, h('div', { class: 'shelf', 'data-drop-parent': shelf.id },
-      racks.length ? h('div', { class: 'racks big' }, racks.map(r => shelfPiece(m, r))) : h('div', { class: 'racks empty-shelf' }, 'No racks on this shelf. Add racks or a loose space from the panel, or keep loose items here.')))),
+      h('div', { class: 'racks big', style: { '--slots': String(unitSlots(m)) } }, racks.map(r => shelfPiece(m, r)),
+        freeSlot(m, shelf, unitSlots(m) - racks.reduce((a, p) => a + pieceWidth(p), 0)))))),
     h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Drag racks and loose spaces to reorder them (long-press on a phone).'));
 }
 function boxTile(m, b, big = false) {
   const s = stats(m, b.id);
   return h('div', { class: 'box-tile' + (big ? ' big' : '') + (nodeMatches(m, b.id) ? '' : ' dim'), 'data-href': nodeHref(m, b.id), 'data-drag': b.id,
       title: `${nodeLabel(b)} — ${s.used}/${s.cap} positions filled (${b.grid_rows}×${b.grid_cols})` },
-    h('div', { class: 'lbl' }, h('span', null, nodeLabel(b))),
+    h('div', { class: 'lbl' }, h('span', null, shortLabel(nodeLabel(b)))),
     h('div', { class: 'tile-sub' }, `${s.used}/${s.cap}`),
     fillGauge(s), ownerBar(b));
+}
+/** A loose space standing where a box would be (in a row, or a tank rack). */
+function boxSpaceTile(m, sp, big = false) {
+  const n = looseCount(m, sp.id);
+  return h('div', { class: 'box-tile space-box' + (big ? ' big' : ''), style: { '--w': String(sp.span || 1) }, 'data-href': nodeHref(m, sp.id), 'data-drag': sp.id,
+      title: `${nodeLabel(sp)} — ${plural(n, 'loose item')}` },
+    h('div', { class: 'lbl' }, h('span', null, shortLabel(nodeLabel(sp)))), h('div', { class: 'tile-sub' }, n ? plural(n, 'item') : 'empty'), ownerBar(sp));
+}
+const boxPiece = (m, b, big) => b.level === 'space' ? boxSpaceTile(m, b, big) : boxTile(m, b, big);
+/** A loose space standing where a row would be (in a freezer rack): a dashed strip. */
+function rowSpaceStrip(m, sp) {
+  const n = looseCount(m, sp.id);
+  return h('div', { class: 'rack-row space-row', style: { flexGrow: String(sp.span || 1) }, 'data-href': nodeHref(m, sp.id),
+      title: `${nodeLabel(sp)} — ${plural(n, 'loose item')}` },
+    h('b', null, nodeLabel(sp)), h('span', { class: 'small' }, n ? plural(n, 'item') : 'empty'), ownerBar(sp));
 }
 /** A loose space: a dashed area (wider for wider spaces) holding its loose items as cards. */
 function spaceView(m, sp) {
@@ -1053,7 +1096,7 @@ function spaceView(m, sp) {
       state.moving
         ? h('button', { class: 'space-item add', onclick: () => moveLoose(m, sp) }, `Put “${state.moving.name}” here`)
         : h('button', { class: 'space-item add', onclick: () => openItemForm({ m, shelf: sp, loose: true }) }, '+ Add item')),
-    h('p', { class: 'small faint', style: { marginTop: '8px' } }, `${span} rack-width${span > 1 ? 's' : ''} wide · ${plural(list.length, 'item')}`));
+    h('p', { class: 'small faint', style: { marginTop: '8px' } }, `${span} ${spanWord(m, sp.parent_id ? m.nodes.get(sp.parent_id).level : null, span)} · ${plural(list.length, 'item')}`));
 }
 function rackView(m, rack) {
   if (isTank(m)) {
@@ -1061,24 +1104,29 @@ function rackView(m, rack) {
     if (!boxes.length) return h('div', { class: 'card empty-note' }, 'This rack has no boxes yet — add boxes from the panel.');
     return h('div', null,
       h('div', { class: 'rack-frame row-frame tank-rack' }, h('div', { class: 'rack-row', 'data-drop-parent': rack.id },
-        h('div', { class: 'row-boxes col' }, boxes.map(b => boxTile(m, b, true))))),
-      h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Box 1 is at the top of the rack. Drag boxes to reorder them (long-press on a phone).'));
+        h('div', { class: 'row-boxes col' }, boxes.map(b => boxPiece(m, b, true))))),
+      h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Box 1 is at the top of the rack. Drag boxes and loose spaces to reorder them (long-press on a phone).'));
   }
   const rowsN = kidsOf(m, rack.id);
   if (!rowsN.length) return h('div', { class: 'card empty-note' }, 'This rack has no rows yet — add rows from the panel.');
-  return h('div', { class: 'rack-frame' }, rowsN.map(r => {
+  // Every box in the rack is the same width: the fullest row sets the scale.
+  const realRows = rowsN.filter(r => r.level === 'row');
+  const boxSlots = Math.max(1, ...realRows.map(r => kidsOf(m, r.id).reduce((a, b) => a + pieceWidth(b), 0)));
+  return h('div', { class: 'rack-frame', style: { '--slots': String(boxSlots) } }, rowsN.map(r => {
+    if (r.level === 'space') return rowSpaceStrip(m, r);
     const s = stats(m, r.id);
+    const kids = kidsOf(m, r.id);
     return h('div', { class: 'rack-row' + (nodeMatches(m, r.id) ? '' : ' dim'), 'data-drop-parent': r.id },
       h('div', { class: 'row-lbl', 'data-href': nodeHref(m, r.id), title: 'Open row' }, nodeLabel(r), h('small', null, `${s.used}/${s.cap}`)),
-      h('div', { class: 'row-boxes' }, kidsOf(m, r.id).length ? kidsOf(m, r.id).map(b => boxTile(m, b)) : h('span', { class: 'faint small', style: { alignSelf: 'center' } }, 'no boxes')));
+      h('div', { class: 'row-boxes' }, kids.map(b => boxPiece(m, b)), freeSlot(m, r, boxSlots - kids.reduce((a, b) => a + pieceWidth(b), 0))));
   }));
 }
 function rowView(m, row) {
   const boxes = kidsOf(m, row.id);
   if (!boxes.length) return h('div', { class: 'card empty-note' }, 'This row has no boxes yet — add boxes from the panel.');
   return h('div', null,
-    h('div', { class: 'rack-frame row-frame' }, h('div', { class: 'rack-row', 'data-drop-parent': row.id }, h('div', { class: 'row-boxes col' }, boxes.map(b => boxTile(m, b, true))))),
-    h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Drag boxes to reorder them (long-press on a phone). Open the rack to move a box to another row.'));
+    h('div', { class: 'rack-frame row-frame' }, h('div', { class: 'rack-row', 'data-drop-parent': row.id }, h('div', { class: 'row-boxes col' }, boxes.map(b => boxPiece(m, b, true))))),
+    h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Drag boxes and loose spaces to reorder them (long-press on a phone). Open the rack to move one to another row.'));
 }
 
 // ---------- Box view ----------
@@ -1170,7 +1218,6 @@ function unitSide(m) {
       h('div', { class: 'row', style: { marginTop: '12px' } },
         h('a', { class: 'btn sm ghost', href: `#/search?unit_id=${u.id}` }, 'List all items'),
         h('a', { class: 'btn sm ghost', href: `#/activity?unit_id=${u.id}` }, 'History'))),
-    looseCard(m, null),
   ];
 }
 /** Layout controls, shown on Details › Edit: what's in the unit, and adding to it. */
@@ -1205,8 +1252,11 @@ function layoutEditCard(m) {
 /** Loose spaces within reach of `scope`: the whole unit (null), a shelf, or a single loose space. */
 function spacesIn(m, scope) {
   if (scope && scope.level === 'space') return [scope];
-  const holders = scope ? [scope.id] : (isTank(m) ? [null] : kidsOf(m, null).map(sh => sh.id));
-  return holders.flatMap(hid => kidsOf(m, hid).filter(x => x.level === 'space'));
+  // Every loose space inside `scope` at any depth (beside racks, rows or boxes), in diagram order.
+  const out = [];
+  const walk = id => { for (const n of kidsOf(m, id)) { if (n.level === 'space') out.push(n); else walk(n.id); } };
+  walk(scope ? scope.id : null);
+  return out;
 }
 /** Loose items card: everything lives in a loose space, so this lists the items in the spaces in scope. */
 function looseCard(m, scope) {
@@ -1243,7 +1293,8 @@ function nodeSide(m, node) {
   const form = h('form', { class: 'stack' },
     field('Name', inp('name', node.name, { placeholder: `${LEVEL[node.level]} ${node.index + 1}` }), 'optional'),
     field('Assigned to', ownerSelect(node.owner_id, node.is_common, inhLabel)),
-    node.level === 'space' ? field('Width', inp('span', node.span || 1, { type: 'number', min: 1, max: 30 }), 'how many rack spaces it takes up') : null,
+    node.level === 'space' ? field(kindHere(m, node) === 'row' ? 'Height' : 'Width', inp('span', node.span || 1, { type: 'number', min: 1, max: 30 }),
+      `how many ${spanWord(m, node.parent_id ? m.nodes.get(node.parent_id).level : null, 2)} it takes up`) : null,
     node.level === 'box' ? h('div', { class: 'grid2' },
       field('Rows', inp('grid_rows', node.grid_rows, { type: 'number', min: 1, max: 26 })),
       field('Columns', inp('grid_cols', node.grid_cols, { type: 'number', min: 1, max: 26 })),
@@ -1265,20 +1316,28 @@ function nodeSide(m, node) {
       h('div', { class: 'card-head' }, h('h3', null, LEVEL[node.level] + ' settings'),
         node.level === 'space' ? h('span', { class: 'small muted' }, plural(looseCount(m, node.id), 'item')) : h('span', { class: 'small muted' }, `${s.used}/${s.cap} filled`)),
       form),
-    node.level === 'shelf' || node.level === 'space' ? looseCard(m, node) : null,
-    node.level === 'rack' || node.level === 'space' || node.level === 'box' ? placeCard(m, node) : null,
+    node.level === 'space' ? looseCard(m, node) : null,
+    ['rack', 'row', 'box', 'space'].includes(node.level) ? placeCard(m, node) : null,
     h('div', { class: 'card' },
       h('div', { class: 'row' },
         child ? h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, node) }, `+ Add ${levelPlural(child)}`) : null,
-        node.level === 'shelf' ? h('button', { class: 'btn sm', onclick: () => addSpaceDialog(m, node) }, '+ Add loose space') : null,
-        node.level === 'rack' ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, 'Replace with loose space') : null,
-        node.level === 'space' ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, 'Replace with rack') : null,
+        ['shelf', 'rack', 'row'].includes(node.level) ? h('button', { class: 'btn sm', onclick: () => addSpaceDialog(m, node) }, '+ Add loose space') : null,
+        ['rack', 'row', 'box'].includes(node.level) ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, 'Replace with loose space') : null,
+        node.level === 'space' ? h('button', { class: 'btn sm', onclick: () => convertNode(m, node) }, `Replace with ${LEVEL[kindHere(m, node)].toLowerCase()}`) : null,
         node.level === 'space' ? mergeButtons(m, node) : null,
         node.level === 'box' ? h('a', { class: 'btn sm', href: `#/search?unit_id=${m.unit.id}&q=${encodeURIComponent('"' + chainOf(m, node.id).map(nodeLabel).join(' › ') + ' ›"')}` }, 'Search in box') : null,
         h('span', { class: 'spacer' }),
         h('button', { class: 'btn sm danger', onclick: () => deleteNode(m, node) }, `Delete ${LEVEL[node.level].toLowerCase()}`))),
   ];
 }
+/** What normally stands where `node` stands: a rack on a shelf / in a tank, a row in a freezer rack, a box in a row or tank rack. */
+const kindHere = (m, node) => childLevel(m.unit.type, node.parent_id ? m.nodes.get(node.parent_id).level : null);
+/** Width unit for a loose space in `holder`. */
+const spanWord = (m, holderLevel, n) => {
+  const k = childLevel(m.unit.type, holderLevel);
+  const w = { rack: 'rack-width', row: 'row', box: 'box-width' }[k] || 'slot';
+  return n === 1 ? w : w + 's';
+};
 /** Where a rack / loose space sits: move left/right or to another shelf (keyboard-friendly twin of drag & drop). */
 function placeCard(m, node) {
   const plan = node.level !== 'box' ? unitPlan(m.unit) : null;
@@ -1302,12 +1361,15 @@ function placeCard(m, node) {
   }
   const sibs = kidsOf(m, node.parent_id);
   const i = sibs.findIndex(x => x.id === node.id);
-  const isBox = node.level === 'box';
   const holder = node.parent_id ? m.nodes.get(node.parent_id) : null;
-  // Racks/spaces can go to any shelf; a box to any row of its rack (in a tank: to any rack).
-  const parents = isBox ? (isTank(m) ? kidsOf(m, null).filter(x => x.level === 'rack') : kidsOf(m, holder.parent_id))
-    : (isTank(m) ? [] : kidsOf(m, null));
-  const vertical = isBox && isTank(m);
+  const holderLevel = holder ? holder.level : null;
+  // Move between holders of the same kind: shelves (racks/spaces), rows of this rack (boxes/spaces),
+  // racks of the tank (boxes/spaces in a tank). Rows only move up and down inside their rack.
+  const parents = holderLevel === 'shelf' ? kidsOf(m, null)
+    : holderLevel === 'row' ? kidsOf(m, holder.parent_id).filter(x => x.level === 'row')
+    : holderLevel === 'rack' && isTank(m) ? kidsOf(m, null).filter(x => x.level === 'rack') : [];
+  const isBox = holderLevel === 'row' || (holderLevel === 'rack' && isTank(m));
+  const vertical = holderLevel === 'rack';     // a rack's rows, or a tank rack's boxes, stack top to bottom
   const shelves = parents;
   const shelfSel = h('select', { class: 'input' }, parents.map(sh => h('option', { value: sh.id }, nodeLabel(sh))));
   shelfSel.value = String(node.parent_id);
@@ -1317,7 +1379,7 @@ function placeCard(m, node) {
     h('div', { class: 'row' },
       h('button', { class: 'btn sm', disabled: i === 0, onclick: () => placeNode(m, node, node.parent_id, sibs[i - 1].id) }, vertical ? '▲ Move up' : '◀ Move left'),
       h('button', { class: 'btn sm', disabled: i === sibs.length - 1, onclick: () => placeNode(m, node, node.parent_id, sibs[i + 2] ? sibs[i + 2].id : null) }, vertical ? 'Move down ▼' : 'Move right ▶')),
-    shelves.length > 1 ? field(isBox ? (isTank(m) ? 'Rack' : 'Row') : 'Shelf', shelfSel, `moves it to the ${vertical ? 'bottom' : 'end'} of that ${isBox ? (isTank(m) ? 'rack' : 'row') : 'shelf'}`) : null,
+    shelves.length > 1 ? field(LEVEL[holderLevel], shelfSel, `moves it to the ${vertical ? 'bottom' : 'end'} of that ${LEVEL[holderLevel].toLowerCase()}`) : null,
     h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Or drag it in the diagram (long-press on a phone).'));
 }
 async function placeNode(m, node, parentId, beforeId) {
@@ -1326,12 +1388,14 @@ async function placeNode(m, node, parentId, beforeId) {
   toast(r.renamed ? `Moved — renamed to “${r.renamed}” (that name was already taken there)` : 'Moved');
   refresh();
 }
-function addSpaceDialog(m, shelf) {
+function addSpaceDialog(m, shelf, defaultSpan = 1) {
   const err = h('p', { class: 'error' });
+  const kind = childLevel(m.unit.type, shelf ? shelf.level : null);
+  const where = !shelf ? 'in the tank' : `in ${nodeLabel(shelf)}, in place of ${kind === 'row' ? 'a row' : 'a ' + kind}`;
   const form = h('form', { class: 'stack' },
-    h('p', { class: 'small muted' }, `A loose space is room ${shelf ? 'on the shelf' : 'in the tank'} for things that are not in racks or boxes: bottles, bags, canes, bulky kits.`),
+    h('p', { class: 'small muted' }, `A loose space is room ${where} for things that aren't in boxes: bottles, bags, canes, bulky kits.`),
     h('div', { class: 'grid2' },
-      field('Width', inp('span', 1, { type: 'number', min: 1, max: 30 }), 'in rack spaces'),
+      field(kind === 'row' ? 'Height' : 'Width', inp('span', defaultSpan, { type: 'number', min: 1, max: 30 }), `in ${spanWord(m, shelf ? shelf.level : null, 2)}`),
       field('Name', inp('name', '', { placeholder: 'optional, e.g. Media bottles' }))), err);
   const go = async () => {
     const v = formData(form);
@@ -1363,33 +1427,34 @@ async function mergeSpaces(m, a, b) {
   if (r) location.hash = nodeHref(m, r.id);
 }
 async function convertNode(m, node) {
-  if (node.level === 'rack') {
+  if (node.level !== 'space') {
     const s = stats(m, node.id);
     if (s.used) { toast(`${nodeLabel(node)} still holds ${plural(s.used, 'item')} — move or remove them first.`, true); return; }
+    const what = { rack: 'rack (and its empty boxes)', row: 'row (and its empty boxes)', box: 'box' }[node.level];
     const ok = await confirmBox(`Replace ${nodeLabel(node)} with a loose space?`,
-      `The empty rack (and its empty boxes) is removed and a loose-item space takes its place. You can widen the space afterwards, or turn it back into a rack.`,
+      `The empty ${what} is removed and a loose-item space takes its place. You can resize the space afterwards, or turn it back.`,
       { okText: 'Replace with loose space' });
     if (ok && await attempt(() => api('POST', `/api/nodes/${node.id}/convert`), 'Now a loose space')) refresh();
     return;
   }
   if (looseCount(m, node.id)) { toast(`${nodeLabel(node)} still holds ${plural(looseCount(m, node.id), 'item')} — move or remove them first.`, true); return; }
-  // Space → rack: ask for the rack's insides, defaulting to its neighbours' layout.
-  const rackSib = kidsOf(m, node.parent_id).find(x => x.level === 'rack');
-  const d = guessLayout(m, node.parent_id, 'rack');
-  if (!rackSib) Object.assign(d, TYPES[m.unit.type].layout);
+  // Space → whatever stands beside it; ask what goes inside, defaulting to its neighbours.
+  const kind = kindHere(m, node);
+  const d = guessLayout(m, node.parent_id, kind);
+  if (!kidsOf(m, node.parent_id).some(x => x.level === kind)) Object.assign(d, TYPES[m.unit.type].layout);
   const err = h('p', { class: 'error' });
   const form = h('form', { class: 'stack' },
-    h('div', { class: 'grid2' }, layoutFieldsBelow(m.unit.type, 'rack', d)), gridFields(d), err);
+    h('div', { class: 'grid2' }, layoutFieldsBelow(m.unit.type, kind, d)), gridFields(d), err);
   const go = async () => {
     const v = formData(form);
     const layout = { grid_rows: +v.grid_rows, grid_cols: +v.grid_cols, label_style: v.label_style };
     for (const k of ['rows', 'boxes']) if (v[k] !== undefined) layout[k] = +v[k];
-    try { await api('POST', `/api/nodes/${node.id}/convert`, { layout }); close(); toast('Now a rack'); refresh(); }
+    try { await api('POST', `/api/nodes/${node.id}/convert`, { layout }); close(); toast(`Now a ${LEVEL[kind].toLowerCase()}`); refresh(); }
     catch (x) { err.textContent = x.message; }
   };
   form.onsubmit = e => { e.preventDefault(); go(); };
-  const close = openModal({ title: `Replace ${nodeLabel(node)} with a rack`, body: form,
-    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Replace with rack')] });
+  const close = openModal({ title: `Replace ${nodeLabel(node)} with a ${LEVEL[kind].toLowerCase()}`, body: form,
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, `Replace with ${LEVEL[kind].toLowerCase()}`)] });
 }
 function layoutFieldsBelow(type, level, defaults) {
   // inputs for the levels strictly below `level` (the level being added)
@@ -1418,13 +1483,13 @@ function guessLayout(m, parentId, level) {
   if (n && n.level === 'box') { d.grid_rows = n.grid_rows; d.grid_cols = n.grid_cols; d.label_style = n.label_style; }
   return d;
 }
-function addChildrenDialog(m, parent) {
+function addChildrenDialog(m, parent, defaultCount = 1) {
   const level = childLevel(m.unit.type, parent ? parent.level : null);
   const d = guessLayout(m, parent ? parent.id : null, level);
   const err = h('p', { class: 'error' });
   const form = h('form', { class: 'stack' },
     h('div', { class: 'grid2' },
-      field(`Number of ${LEVEL[level].toLowerCase()}s to add`, inp('count', 1, { type: 'number', min: 1, max: 40 }), null, 'span-all'),
+      field(`Number of ${levelPlural(level)} to add`, inp('count', defaultCount, { type: 'number', min: 1, max: 40 }), null, 'span-all'),
       layoutFieldsBelow(m.unit.type, level, d)),
     gridFields(d),
     err);

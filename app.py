@@ -45,7 +45,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 10
+API_VERSION = 11
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -734,6 +734,12 @@ def _stored_under(conn, node_id):
     return conn.execute(f"SELECT COUNT(*) FROM items WHERE status='stored' AND node_id IN ({q})", ids).fetchone()[0]
 
 
+def _slot_word(level, n=1):
+    """What a loose space's width is counted in, where it stands: rack-widths, rows or box-widths."""
+    word = {"rack": "rack-width", "row": "row", "box": "box-width"}.get(level, "slot")
+    return word + ("s" if n != 1 else "")
+
+
 @route("POST", "/api/units/<id>/nodes")
 def add_nodes(ctx):
     """Add children: shelves to a unit (parent_id null) or racks/rows/boxes to a node."""
@@ -751,14 +757,15 @@ def add_nodes(ctx):
     else:
         level = chain[0]
     if b.get("level") == "space":
-        # Loose spaces sit beside racks: on a shelf, or straight in an LN2 tank.
-        require((parent and parent["level"] == "shelf") or (not parent and chain[0] == "rack"),
-                "Loose spaces go on a shelf (or straight in a tank)")
+        # Loose spaces take the place of whatever normally sits there: racks on a shelf (or in a
+        # tank), rows in a rack, boxes in a row (or in a tank rack).
+        require((parent and parent["level"] in ("shelf", "rack", "row")) or (not parent and chain[0] == "rack"),
+                "A loose space goes on a shelf, in a rack or in a row")
         span = as_int(b.get("span") or 1, "Width", 1, MAX_SPAN)
         start = _next_pos(conn, uid, parent_id)
         cur = conn.execute("INSERT INTO nodes (unit_id, parent_id, level, position, span, name) VALUES (?,?,?,?,?,?)",
                            (uid, parent_id, "space", start, span, text(b, "name", 80)))
-        log(ctx, "node.add", f"Added a loose space ({span} rack-width{'s' if span > 1 else ''})", unit_id=uid)
+        log(ctx, "node.add", f"Added a loose space ({span} {_slot_word(level, span)})", unit_id=uid)
         conn.commit()
         return {"ids": [cur.lastrowid]}
     count = as_int(b.get("count") or 1, "Count", 1, LAYOUT_MAX[LAYOUT_KEYS[level]])
@@ -860,35 +867,40 @@ def _free_name(conn, unit_id, holder_id, base, exclude_id):
 
 @route("POST", "/api/nodes/<id>/convert")
 def convert_node(ctx):
-    """Swap an empty rack for a loose space (same spot on the shelf), or back."""
+    """Swap an empty rack, row or box for a loose space in the same spot — or a loose space back
+    into whatever sits beside it (a rack on a shelf, a row in a rack, a box in a row or tank rack)."""
     conn, b = ctx["conn"], ctx["body"]
     nid = as_int(ctx["params"]["id"], "id")
     n = one(conn.execute("SELECT * FROM nodes WHERE id = ?", (nid,)))
-    require(n and n["level"] in SHELF_CHILDREN, "Only racks and loose spaces can be converted")
+    require(n and n["level"] in ("rack", "row", "box", "space"), "Only racks, rows, boxes and loose spaces can be converted")
     cnt = _stored_under(conn, nid)
     tree = Tree(conn, n["unit_id"])
     old_label = tree.label(tree.nodes[nid])
-    if n["level"] == "rack":
-        require(cnt == 0, f"This rack still holds {cnt} item(s) — move or remove them first.", 409)
-    else:
-        require(cnt == 0, f"This space still holds {cnt} loose item(s) — move or remove them first.", 409)
+    require(cnt == 0, f"{old_label} still holds {cnt} item(s) — move or remove them first.", 409)
+    chain = unit_chain(conn, n["unit_id"])
+    parent = tree.nodes.get(n["parent_id"])
+    kind = next_level(parent["level"], chain) if parent else chain[0]       # what normally sits here
+    require(kind, "Nothing can stand here")
     # Pin the other pieces' names so converting this one doesn't renumber its neighbours.
     _freeze_labels(conn, tree, {n["parent_id"]})
-    if n["level"] == "rack":
-        conn.execute("DELETE FROM nodes WHERE parent_id = ?", (nid,))   # rows → boxes cascade
-        name = n["name"] if n["name"] and not re.fullmatch(r"Rack \d+", n["name"]) else None
+    if n["level"] != "space":
+        conn.execute("DELETE FROM nodes WHERE parent_id = ?", (nid,))   # its (empty) contents
+        name = n["name"] if n["name"] and not re.fullmatch(rf"{LEVEL_LABEL[n['level']]} \d+", n["name"]) else None
         name = name or _free_name(conn, n["unit_id"], n["parent_id"], "Loose space", nid)
         conn.execute("UPDATE nodes SET level='space', span=1, name=? WHERE id=?", (name, nid))
         log(ctx, "node.convert", f"Replaced {old_label} with a loose space", unit_id=n["unit_id"])
     else:
-        chain = unit_chain(conn, n["unit_id"])
-        inner = next_level("rack", chain)          # rows in a freezer, boxes in a tank
-        layout = clean_layout(b.get("layout") or {}, inner, chain)
+        inner = next_level(kind, chain)
+        layout = clean_layout(b.get("layout") or {}, inner, chain) if inner else clean_layout(b.get("layout") or {}, "box", chain)
         name = n["name"] if n["name"] and not re.fullmatch(r"Loose space \d+", n["name"]) else None
-        name = name or _free_name(conn, n["unit_id"], n["parent_id"], "Rack", nid)
-        conn.execute("UPDATE nodes SET level='rack', span=1, name=? WHERE id=?", (name, nid))
-        build_nodes(conn, n["unit_id"], nid, inner, layout[LAYOUT_KEYS[inner]], layout, 0, chain)
-        log(ctx, "node.convert", f"Replaced {old_label} with a rack", unit_id=n["unit_id"])
+        name = name or _free_name(conn, n["unit_id"], n["parent_id"], LEVEL_LABEL[kind], nid)
+        if kind == "box":
+            conn.execute("UPDATE nodes SET level='box', span=1, name=?, grid_rows=?, grid_cols=?, label_style=? WHERE id=?",
+                         (name, layout["grid_rows"], layout["grid_cols"], layout["label_style"], nid))
+        else:
+            conn.execute("UPDATE nodes SET level=?, span=1, name=? WHERE id=?", (kind, name, nid))
+            build_nodes(conn, n["unit_id"], nid, inner, layout[LAYOUT_KEYS[inner]], layout, 0, chain)
+        log(ctx, "node.convert", f"Replaced {old_label} with a {LEVEL_LABEL[kind].lower()}", unit_id=n["unit_id"])
     conn.commit()
     return {"ok": True}
 
@@ -1017,16 +1029,13 @@ def place_many(ctx):
     """Move a group of racks/loose spaces (or boxes) together: {ids, parent_id, before_id}.
     They keep their order and land side by side."""
     conn, b = ctx["conn"], ctx["body"]
-    nodes, _ = _group(conn, b.get("ids"), SHELF_CHILDREN + ("box",))
-    require(len({n["level"] == "box" for n in nodes}) == 1, "Move boxes and racks separately")
+    nodes, _ = _group(conn, b.get("ids"), ("rack", "row", "box", "space"))
     unit_id, old_holder = nodes[0]["unit_id"], nodes[0]["parent_id"]
-    chain = unit_chain(conn, unit_id)
-    if nodes[0]["level"] == "box":
-        holder_level = chain[chain.index("box") - 1]
-    else:
-        holder_level = "shelf" if "shelf" in chain else None
-        require(not (holder_level is None and unit_plan(conn, unit_id)),
-                "Racks in this tank sit in fixed slots — swap them one at a time")
+    # They all share one holder (checked by _group); they move to another holder of the same kind.
+    cur = one(conn.execute("SELECT level FROM nodes WHERE id = ?", (old_holder,))) if old_holder else None
+    holder_level = cur["level"] if cur else None
+    require(not (holder_level is None and unit_plan(conn, unit_id)),
+            "Racks in this tank sit in fixed slots — swap them one at a time")
     if holder_level:
         target = as_int(b.get("parent_id"), holder_level.capitalize(), allow_none=False)
         require(conn.execute("SELECT 1 FROM nodes WHERE id = ? AND unit_id = ? AND level = ?",
@@ -1105,14 +1114,12 @@ def place_node(ctx):
     conn, b = ctx["conn"], ctx["body"]
     nid = as_int(ctx["params"]["id"], "id")
     n = one(conn.execute("SELECT * FROM nodes WHERE id = ?", (nid,)))
-    require(n and (n["level"] in SHELF_CHILDREN or n["level"] == "box"), "Only racks, loose spaces and boxes can be moved")
+    require(n and n["level"] in ("rack", "row", "box", "space"), "Only racks, rows, boxes and loose spaces can be moved")
     chain = unit_chain(conn, n["unit_id"])
-    # What holds this piece: boxes sit in a row (freezer) or a rack (tank); racks and loose spaces
-    # sit on a shelf (freezer) or straight in the tank (None = the unit itself).
-    if n["level"] == "box":
-        parent_level = chain[chain.index("box") - 1]
-    else:
-        parent_level = "shelf" if "shelf" in chain else None
+    # A piece moves between holders of the same kind it's in now: racks/spaces between shelves (or
+    # around a tank), rows/spaces between racks, boxes/spaces between rows (tank: between racks).
+    cur_parent = one(conn.execute("SELECT level FROM nodes WHERE id = ?", (n["parent_id"],))) if n["parent_id"] else None
+    parent_level = cur_parent["level"] if cur_parent else None
     if parent_level:
         shelf_id = as_int(b.get("parent_id"), parent_level.capitalize(), allow_none=False)
         shelf = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND unit_id = ? AND level = ?",
@@ -1124,7 +1131,7 @@ def place_node(ctx):
     tree = Tree(conn, n["unit_id"])
     holder_label = lambda hid: tree.label(tree.nodes[hid]) if hid else tree.units[n["unit_id"]]["name"]
     _freeze_labels(conn, tree, {n["parent_id"], shelf_id})
-    plan = unit_plan(conn, n["unit_id"]) if parent_level is None and n["level"] != "box" else None
+    plan = unit_plan(conn, n["unit_id"]) if parent_level is None else None
     if plan:
         # Arranged tank: racks sit in fixed slots, so a drop swaps two racks or fills an empty slot.
         label = tree.label(tree.nodes[nid])
