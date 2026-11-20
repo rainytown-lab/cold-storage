@@ -37,7 +37,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 3
+API_VERSION = 4
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -489,7 +489,7 @@ def _unit_fields(conn, b, partial=False):
     if not partial or "type" in b:
         require(b.get("type") in UNIT_TYPES, "Pick a storage type")
         out["type"] = b["type"]
-    for k in ("location", "size", "manufacturer", "model", "serial_number", "inventory_number", "notes"):
+    for k in ("location", "size", "manufacturer", "device_name", "model", "serial_number", "inventory_number", "notes"):
         if not partial or k in b:
             out[k] = text(b, k, 2000 if k == "notes" else 200)
     for k, label in (("last_defrost", "Date of last defrost"), ("last_pm", "Date of last PM")):
@@ -498,6 +498,33 @@ def _unit_fields(conn, b, partial=False):
     if not partial or "owner_id" in b or "is_common" in b:
         out["owner_id"], out["is_common"] = owner_fields(conn, b)
     return out
+
+
+def clean_plan(p):
+    """Validate a tank arrangement (see db.CE8120_PLAN). Returns a dict or None."""
+    if not p:
+        return None
+    if isinstance(p, str):
+        try:
+            p = json.loads(p)
+        except ValueError:
+            raise ApiError("Bad rack arrangement")
+    require(isinstance(p, dict), "Bad rack arrangement")
+    cols = as_int(p.get("cols"), "Arrangement columns", 1, 10, False)
+    rows_ = as_int(p.get("rows"), "Arrangement rows", 1, 10, False)
+    slots, seen = [], set()
+    for sl in p.get("slots") or []:
+        c, r = as_int(sl.get("c"), "Slot column", 0, cols - 1, False), as_int(sl.get("r"), "Slot row", 0, rows_ - 1, False)
+        require((c, r) not in seen, "Two slots in the same place")
+        seen.add((c, r))
+        slots.append({"name": str(sl.get("name") or "")[:12], "c": c, "r": r})
+    require(1 <= len(slots) <= 60, "An arrangement needs 1–60 slots")
+    return {"cols": cols, "rows": rows_, "dividers": bool(p.get("dividers")), "slots": slots}
+
+
+def unit_plan(conn, unit_id):
+    r = conn.execute("SELECT plan FROM units WHERE id = ?", (unit_id,)).fetchone()
+    return json.loads(r[0]) if r and r[0] else None
 
 
 UNIT_LIST_SQL = """
@@ -521,10 +548,19 @@ def create_unit(ctx):
     conn, b = ctx["conn"], ctx["body"]
     f = _unit_fields(conn, b)
     layout = clean_layout(b.get("layout") or {}, "shelf")
+    plan = clean_plan(b.get("plan")) if f["type"] == "ln2" else None
+    if plan and layout["racks"] != len(plan["slots"]):
+        plan = None   # the arrangement only applies when every slot gets exactly one rack
+    f["plan"] = json.dumps(plan) if plan else None
     cur = conn.execute(f"INSERT INTO units ({', '.join(f)}) VALUES ({', '.join('?' * len(f))})",
                        tuple(f.values()))
     uid = cur.lastrowid
     build_nodes(conn, uid, None, "shelf", layout["shelves"], layout)
+    if plan:   # racks take the slot names (A1, A2, …) in slot order
+        for shelf_id, in conn.execute("SELECT id FROM nodes WHERE unit_id = ? AND level = 'shelf'", (uid,)).fetchall():
+            racks = conn.execute("SELECT id FROM nodes WHERE parent_id = ? ORDER BY position, id", (shelf_id,)).fetchall()
+            for i, (rid,) in enumerate(racks):
+                conn.execute("UPDATE nodes SET name = ?, position = ? WHERE id = ?", (plan["slots"][i]["name"] or None, i, rid))
     log(ctx, "unit.add", f"Added {UNIT_TYPE_LABEL[f['type']]} “{f['name']}”", unit_id=uid)
     conn.commit()
     return {"id": uid}
@@ -552,6 +588,9 @@ def update_unit(ctx):
     uid = as_int(ctx["params"]["id"], "id")
     require(conn.execute("SELECT 1 FROM units WHERE id = ?", (uid,)).fetchone(), "Not found", 404)
     f = _unit_fields(conn, ctx["body"], partial=True)
+    if "plan" in ctx["body"]:
+        plan = clean_plan(ctx["body"]["plan"])
+        f["plan"] = json.dumps(plan) if plan else None
     if f:
         conn.execute(f"UPDATE units SET {', '.join(k + ' = ?' for k in f)} WHERE id = ?",
                      (*f.values(), uid))
@@ -581,7 +620,22 @@ def delete_unit(ctx):
     return {"ok": True}
 
 
+def _free_slots(conn, uid, shelf_id):
+    """Empty slot indexes on a shelf of an arranged tank ([] if not arranged)."""
+    plan = unit_plan(conn, uid)
+    if not plan or not shelf_id:
+        return []
+    lvl = conn.execute("SELECT level FROM nodes WHERE id = ?", (shelf_id,)).fetchone()
+    if not lvl or lvl[0] != "shelf":
+        return []
+    used = {r[0] for r in conn.execute("SELECT position FROM nodes WHERE parent_id = ?", (shelf_id,))}
+    return [i for i in range(len(plan["slots"])) if i not in used]
+
+
 def _next_pos(conn, uid, parent_id):
+    free = _free_slots(conn, uid, parent_id)
+    if free:
+        return free[0]
     return conn.execute(
         "SELECT COALESCE(MAX(position), -1) + 1 FROM nodes WHERE unit_id = ? AND parent_id IS ?",
         (uid, parent_id)).fetchone()[0]
@@ -624,7 +678,20 @@ def add_nodes(ctx):
     for lvl in LEVELS[LEVELS.index(level):]:
         per *= layout[LAYOUT_KEYS[lvl]]
     require(total + per <= MAX_BOXES_PER_UNIT, f"That would exceed {MAX_BOXES_PER_UNIT} boxes in this unit")
-    ids = build_nodes(conn, uid, parent_id, level, count, layout, _next_pos(conn, uid, parent_id))
+    if _free_slots(conn, uid, parent_id):
+        # Arranged tank: each new rack fills the next empty slot.
+        ids = []
+        plan = unit_plan(conn, uid)
+        for _ in range(count):
+            pos = _next_pos(conn, uid, parent_id)
+            ids += build_nodes(conn, uid, parent_id, level, 1, layout, pos)
+            # Name it after its slot ("C3") unless another rack on this shelf already has that name.
+            slot_name = plan["slots"][pos]["name"] if pos < len(plan["slots"]) else None
+            taken = conn.execute("SELECT 1 FROM nodes WHERE parent_id = ? AND name = ?", (parent_id, slot_name)).fetchone()
+            conn.execute("UPDATE nodes SET name = ? WHERE id = ?",
+                         (slot_name if slot_name and not taken else _free_name(conn, parent_id, "Rack", ids[-1]), ids[-1]))
+    else:
+        ids = build_nodes(conn, uid, parent_id, level, count, layout, _next_pos(conn, uid, parent_id))
     log(ctx, "node.add", f"Added {count} {LEVEL_LABEL[level].lower()}{'s' if count > 1 else ''}", unit_id=uid)
     conn.commit()
     return {"ids": ids}
@@ -749,6 +816,31 @@ def place_node(ctx):
     before = as_int(b.get("before_id"), "before")
     tree = Tree(conn, n["unit_id"])
     _freeze_labels(conn, tree, {n["parent_id"], shelf_id})
+    plan = unit_plan(conn, n["unit_id"]) if parent_level == "shelf" else None
+    if plan:
+        # Arranged tank: racks sit in fixed slots, so a drop swaps two racks or fills an empty slot.
+        label = tree.label(tree.nodes[nid])
+        swap = as_int(b.get("swap_with"), "swap")
+        if swap is not None:
+            other = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND parent_id = ?", (swap, shelf_id)))
+            require(other and other["id"] != nid, "That rack isn't on this shelf")
+            conn.execute("UPDATE nodes SET parent_id = ?, position = ? WHERE id = ?", (n["parent_id"], n["position"], swap))
+            conn.execute("UPDATE nodes SET parent_id = ?, position = ? WHERE id = ?", (shelf_id, other["position"], nid))
+            log(ctx, "node.move", f"Swapped {label} and {tree.label(tree.nodes[swap])}", unit_id=n["unit_id"])
+        else:
+            slot = as_int(b.get("slot"), "slot")
+            if slot is None:
+                free = _free_slots(conn, n["unit_id"], shelf_id)
+                require(free, "No empty slot there — drop it onto a rack to swap them")
+                slot = free[0]
+            require(0 <= slot < len(plan["slots"]), "No such slot")
+            taken = conn.execute("SELECT 1 FROM nodes WHERE parent_id = ? AND position = ? AND id != ?",
+                                 (shelf_id, slot, nid)).fetchone()
+            require(not taken, "That slot is taken — drop onto the rack to swap them")
+            conn.execute("UPDATE nodes SET parent_id = ?, position = ? WHERE id = ?", (shelf_id, slot, nid))
+            log(ctx, "node.move", f"Moved {label} to slot {plan['slots'][slot]['name'] or slot + 1}", unit_id=n["unit_id"])
+        conn.commit()
+        return {"ok": True, "renamed": None}
     sibs = [r[0] for r in conn.execute(
         "SELECT id FROM nodes WHERE parent_id = ? AND id != ? ORDER BY position, id", (shelf_id, nid))]
     if before is not None:
@@ -775,6 +867,84 @@ def place_node(ctx):
         log(ctx, "node.edit", f"Renamed {label} to {renamed} (that name was taken on the new shelf)", unit_id=n["unit_id"])
     conn.commit()
     return {"ok": True, "renamed": renamed}
+
+
+# --------------------------------------------------------------------------- #
+# Presets (ready-made set-ups for common models)
+# --------------------------------------------------------------------------- #
+
+def _preset_out(p):
+    p = dict(p)
+    p["layout"] = json.loads(p["layout"])
+    p["plan"] = json.loads(p["plan"]) if p["plan"] else None
+    return p
+
+
+@route("GET", "/api/presets")
+def list_presets(ctx):
+    return [_preset_out(p) for p in rows(ctx["conn"].execute(
+        "SELECT * FROM presets ORDER BY type, name COLLATE NOCASE"))]
+
+
+@route("POST", "/api/presets")
+def create_preset(ctx):
+    """Save an existing unit's set-up as a preset: {from_unit, name}."""
+    conn, b = ctx["conn"], ctx["body"]
+    uid = as_int(b.get("from_unit"), "Storage unit", allow_none=False)
+    u = one(conn.execute("SELECT * FROM units WHERE id = ?", (uid,)))
+    require(u, "Storage unit not found", 404)
+    name = text(b, "name", 120) or " ".join(x for x in (u["manufacturer"], u["device_name"], u["model"]) if x) or u["name"]
+    tree = Tree(conn, uid)
+    kids = defaultdict(list)
+    for nd in sorted(tree.nodes.values(), key=lambda x: (x["position"], x["id"])):
+        kids[nd["parent_id"]].append(nd)
+    # Describe the layout from the first shelf / rack / row / box (presets are uniform).
+    layout = {"shelves": len([x for x in kids[None] if x["level"] == "shelf"]), "racks": 0, "rows": 0, "boxes": 0,
+              "grid_rows": 9, "grid_cols": 9, "label_style": "grid"}
+    node = (kids[None] or [None])[0]
+    if node:
+        racks = [x for x in kids[node["id"]] if x["level"] == "rack"]
+        layout["racks"] = len(racks)
+        node = racks[0] if racks else None
+    if node:
+        layout["rows"] = len(kids[node["id"]])
+        node = (kids[node["id"]] or [None])[0]
+    if node:
+        layout["boxes"] = len(kids[node["id"]])
+        node = (kids[node["id"]] or [None])[0]
+    if node:
+        layout.update(grid_rows=node["grid_rows"], grid_cols=node["grid_cols"], label_style=node["label_style"])
+    cur = conn.execute(
+        "INSERT INTO presets (name, type, manufacturer, device_name, model, size, layout, plan) VALUES (?,?,?,?,?,?,?,?)",
+        (name, u["type"], u["manufacturer"], u["device_name"], u["model"], u["size"], json.dumps(layout), u["plan"]))
+    conn.commit()
+    return {"id": cur.lastrowid, "name": name}
+
+
+@route("PUT", "/api/presets/<id>")
+def update_preset(ctx):
+    conn, b = ctx["conn"], ctx["body"]
+    pid = as_int(ctx["params"]["id"], "id")
+    require(conn.execute("SELECT 1 FROM presets WHERE id = ?", (pid,)).fetchone(), "Preset not found", 404)
+    sets = {}
+    for k in ("name", "manufacturer", "device_name", "model", "size", "notes"):
+        if k in b:
+            sets[k] = text(b, k, 200)
+    if "name" in sets:
+        require(sets["name"], "Name is required")
+    if "layout" in b:
+        sets["layout"] = json.dumps(clean_layout(b["layout"] or {}, "shelf"))
+    if sets:
+        conn.execute(f"UPDATE presets SET {', '.join(k + ' = ?' for k in sets)} WHERE id = ?", (*sets.values(), pid))
+    conn.commit()
+    return {"ok": True}
+
+
+@route("DELETE", "/api/presets/<id>")
+def delete_preset(ctx):
+    ctx["conn"].execute("DELETE FROM presets WHERE id = ?", (as_int(ctx["params"]["id"], "id"),))
+    ctx["conn"].commit()
+    return {"ok": True}
 
 
 # --------------------------------------------------------------------------- #

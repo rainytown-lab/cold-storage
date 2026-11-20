@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 3;   // must match API_VERSION in app.py
+const API_VERSION = 4;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space' };
 const CHILD = { shelf: 'rack', rack: 'row', row: 'box', box: null, space: null };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
@@ -268,7 +268,7 @@ document.addEventListener('click', e => {
 // Mouse: drag after moving 6px.  Touch/pen: long-press 350 ms, then drag.
 // ------------------------------------------------------------------------ //
 const dnd = { st: null, suppressClickUntil: 0 };
-function dndClear() { for (const el of document.querySelectorAll('.drop-before, .drop-after, .drop-into')) el.classList.remove('drop-before', 'drop-after', 'drop-before-v', 'drop-after-v', 'drop-into'); }
+function dndClear() { for (const el of document.querySelectorAll('.drop-before, .drop-after, .drop-into, .drop-swap')) el.classList.remove('drop-before', 'drop-after', 'drop-before-v', 'drop-after-v', 'drop-into', 'drop-swap'); }
 function dndStart() {
   const st = dnd.st;
   st.active = true;
@@ -288,6 +288,13 @@ function dndTarget(x, y) {
   if (!zone || !zone.closest('[data-dnd]')) return;
   const parent = +zone.dataset.dropParent;
   const tile = el.closest('[data-drag]');
+  if (zone.dataset.plan) {
+    // Arranged tank: racks live in fixed slots — drop on a rack to swap, on an empty slot to move there.
+    const slotEl = el.closest('[data-slot]');
+    if (tile && tile !== st.src && zone.contains(tile)) { tile.classList.add('drop-swap'); st.target = { parent, swap_with: +tile.dataset.drag }; }
+    else if (slotEl && zone.contains(slotEl)) { slotEl.classList.add('drop-swap'); st.target = { parent, slot: +slotEl.dataset.slot }; }
+    return;
+  }
   if (tile && tile !== st.src && zone.contains(tile)) {
     const r = tile.getBoundingClientRect();
     const vertical = getComputedStyle(tile.parentElement).flexDirection === 'column';
@@ -314,6 +321,12 @@ function dndEnd(commit) {
   st.ghost?.remove();
   dndClear();
   if (!commit || !st.target) return;
+  const t = st.target;
+  if (t.swap_with != null || t.slot != null) {
+    attempt(() => api('POST', `/api/nodes/${st.id}/place`, { parent_id: t.parent, swap_with: t.swap_with, slot: t.slot }))
+      .then(r => { if (r) toast(t.swap_with != null ? 'Swapped' : 'Moved'); refresh(); });
+    return;
+  }
   // Skip no-op drops (same shelf, same slot).
   const sibs = [...st.src.closest('[data-drop-parent]').querySelectorAll('[data-drag]')].map(t => +t.dataset.drag);
   const i = sibs.indexOf(st.id);
@@ -476,7 +489,7 @@ function unitCard(u) {
     h('div', { class: 'row' }, h('span', { class: 'type-badge' }, t.short), h('span', { class: 'small muted' }, t.label), h('span', { class: 'spacer' }),
       ownerChip(u.owner_id, u.is_common, { short: true })),
     h('h2', null, u.name),
-    h('div', { class: 'meta' }, [u.manufacturer, u.model].filter(Boolean).join(' ') || u.size || ''),
+    h('div', { class: 'meta' }, [u.device_name || u.manufacturer, u.model].filter(Boolean).join(' ') || u.size || ''),
     h('div', { class: 'fillbar' }, h('i', { style: { width: pct + '%' } })),
     h('div', { class: 'meta row' }, h('span', null, `${boxed.toLocaleString()} / ${u.capacity.toLocaleString()} positions · ${plural(u.box_count, 'box')}`.replace('boxs', 'boxes')),
       u.loose ? h('span', { class: 'pill' }, `${u.loose} loose`) : null),
@@ -635,7 +648,18 @@ function locator(m, node) {
   const shelves = kidsOf(m, null);
   const cellTitle = n => n.level === 'space' ? `${nodeLabel(n)} (${plural(looseCount(m, n.id), 'item')})` : `${nodeLabel(n)} — ${stats(m, n.id).used}/${stats(m, n.id).cap}`;
   let unitMap;
-  if (m.unit.type === 'ln2') {
+  const lplan = unitPlan(m.unit);
+  const lsh = shelf || shelves[0];
+  if (m.unit.type === 'ln2' && lsh && planFits(lplan, kidsOf(m, lsh.id))) {
+    const { pos, size } = planGeom(lplan, 50, 44);
+    const byPos = new Map(kidsOf(m, lsh.id).map(p => [p.position, p]));
+    const cells = lplan.slots.map((sl, i) => {
+      const [x, y] = pos(sl), p = byPos.get(i);
+      return `<rect class="${p && piece && p.id === piece.id ? 'on' : ''}${p ? '' : ' empty'}${p && p.level === 'space' ? ' space' : ''}" ${p ? `data-href="${nodeHref(m, p.id)}"` : ''} x="${(x - size / 2).toFixed(1)}" y="${(y - size / 2).toFixed(1)}" width="${size.toFixed(1)}" height="${size.toFixed(1)}" rx="1.5"><title>${esc(p ? cellTitle(p) : 'Empty slot ' + sl.name)}</title></rect>`;
+    }).join('');
+    const walls = lplan.dividers ? '<line class="divider" x1="50" y1="6" x2="50" y2="94"/><line class="divider" x1="6" y1="50" x2="94" y2="50"/>' : '';
+    unitMap = h('div', { class: 'loc-map', html: `<svg viewBox="0 0 100 100" class="loc-dewar"><circle class="wall" cx="50" cy="50" r="48"/>${walls}${cells}</svg>` });
+  } else if (m.unit.type === 'ln2') {
     const sh = shelf || shelves[0];
     const pieces = kidsOf(m, sh.id);
     const slots = [];
@@ -722,11 +746,66 @@ function cabinetView(m) {
             : h('div', { class: 'racks empty-shelf' }, h('span', null, 'Empty shelf — ', h('a', { href: nodeHref(m, sh.id) }, 'open it'), ' to add racks or a loose space, or drop a rack here')));
       }) : h('div', { class: 'empty-note' }, 'No shelves yet — add one from the panel on the right.')));
 }
+// ---------- Arranged tanks (racks in fixed compartment slots, e.g. CryoExtra CE8120) ----------
+function unitPlan(unit) {
+  const p = unit && unit.plan;
+  if (!p) return null;
+  try { return typeof p === 'string' ? JSON.parse(p) : p; } catch { return null; }
+}
+/** The arrangement applies to a tier when every rack sits in a distinct, existing slot. */
+function planFits(plan, pieces) {
+  return !!plan && pieces.every(p => p.position < plan.slots.length) && new Set(pieces.map(p => p.position)).size === pieces.length;
+}
+/** Slot centres inside a circle of radius R around (C, C), as seen from above. */
+function planGeom(plan, C, R) {
+  const n = Math.max(plan.cols, plan.rows);
+  const pitch = (2 * R * 0.86) / n, size = pitch * 0.9, gap = plan.dividers ? pitch * 0.06 : 0;
+  const pos = sl => {
+    const dx = sl.c - (plan.cols - 1) / 2, dy = sl.r - (plan.rows - 1) / 2;
+    return [C + dx * pitch + Math.sign(dx) * gap, C + dy * pitch + Math.sign(dy) * gap];
+  };
+  return { pos, size };
+}
+function planSVG(m, sh, plan, pieces) {
+  const { pos, size } = planGeom(plan, 160, 142);
+  const bySlot = new Map(pieces.map(p => [p.position, p]));
+  const walls = plan.dividers ? `<line class="divider" x1="160" y1="18" x2="160" y2="302"/><line class="divider" x1="18" y1="160" x2="302" y2="160"/>` : '';
+  const cells = plan.slots.map((sl, i) => {
+    const [x, y] = pos(sl), x0 = x - size / 2, y0 = y - size / 2, rx = size * 0.1;
+    const p = bySlot.get(i);
+    if (!p) return `<g class="slot-empty" data-slot="${i}"><title>Empty slot ${esc(sl.name)} — drop a rack here</title>
+      <rect x="${x0}" y="${y0}" width="${size}" height="${size}" rx="${rx}"/><text x="${x}" y="${y}">${esc(sl.name)}</text></g>`;
+    const name = nodeLabel(p), lbl = esc(name.length > 6 ? name.slice(0, 6) : name), long = name.length > 3 ? 'long' : '';
+    if (p.level === 'space') {
+      const cnt = looseCount(m, p.id);
+      return `<g class="rk space" data-href="${nodeHref(m, p.id)}" data-drag="${p.id}"><title>${esc(name)} (slot ${esc(sl.name)}) — ${cnt} loose item(s) · drag onto another slot to swap</title>
+        <rect x="${x0}" y="${y0}" width="${size}" height="${size}" rx="${rx}"/><text class="${long}" x="${x}" y="${y - 6}">${lbl}</text><text class="sub" x="${x}" y="${y + 9}">${cnt} item${cnt === 1 ? '' : 's'}</text></g>`;
+    }
+    const s = stats(m, p.id), own = p.owner_id || p.is_common;
+    return `<g class="rk${nodeMatches(m, p.id) ? '' : ' dim'}" data-href="${nodeHref(m, p.id)}" data-drag="${p.id}">
+      <title>${esc(name)}${name !== sl.name ? ` (in slot ${esc(sl.name)})` : ''} — ${s.used}/${s.cap} filled${own ? ' · ' + esc(ownerName(p.owner_id, p.is_common)) : ''} · drag onto another slot to swap</title>
+      <rect x="${x0}" y="${y0}" width="${size}" height="${size}" rx="${rx}" style="fill:${fillColor(frac(s))}"/>
+      ${own ? `<rect x="${x0 + 4}" y="${y0 + size - 7}" width="${size - 8}" height="3" rx="1.5" style="fill:${p.is_common ? 'var(--text-faint)' : userColor(p.owner_id)};stroke:none"/>` : ''}
+      <text class="${long}" x="${x}" y="${y - 6}">${lbl}</text><text class="sub" x="${x}" y="${y + 9}">${s.cap ? Math.round(100 * frac(s)) + '%' : '—'}</text></g>`;
+  }).join('');
+  return walls + cells;
+}
+
 function dewarView(m) {
   const shelves = kidsOf(m, null);
   if (!shelves.length) return h('div', { class: 'card empty-note' }, 'No tiers yet — add a shelf/tier from the panel on the right.');
+  const plan = unitPlan(m.unit);
   return h('div', { class: 'dewar-wrap' }, shelves.map(sh => {
     const pieces = kidsOf(m, sh.id);
+    if (planFits(plan, pieces)) {
+      const lc = looseCount(m, sh.id);
+      return h('div', { class: 'dewar', 'data-drop-parent': sh.id, 'data-plan': '1', style: { flex: shelves.length > 1 ? '1 1 300px' : '1 1 100%' } },
+        h('div', { class: 'shelf-head' }, h('a', { href: nodeHref(m, sh.id) }, shelves.length > 1 ? nodeLabel(sh) : `${nodeLabel(sh)} (top view)`),
+          ownerChip(sh.owner_id, sh.is_common, { short: true }), lc ? h('span', { class: 'pill' }, `${lc} loose`) : null,
+          h('span', { class: 'spacer' }), h('span', { class: 'faint' }, `${pieces.length}/${plan.slots.length} slots used`)),
+        h('div', { html: `<svg viewBox="0 0 320 320" role="img" aria-label="Top view of ${esc(m.unit.name)}">
+          <circle class="wall" cx="160" cy="160" r="156"/><circle class="inner" cx="160" cy="160" r="142"/>${planSVG(m, sh, plan, pieces)}</svg>` }));
+    }
     // Each rack takes one slot round the tank; a loose space takes `span` consecutive slots.
     const slots = [];
     pieces.forEach(p => { for (let k = 0; k < (p.level === 'space' ? (p.span || 1) : 1); k++) slots.push(p); });
@@ -886,7 +965,7 @@ async function onCell(e, m, box, r, c, it) {
 // ---------- Side panels ----------
 function unitSide(m) {
   const u = m.unit, t = TYPES[u.type];
-  const kv = [['Type', t.label], ['Location', u.location], ['Size', u.size], ['Manufacturer', u.manufacturer], ['Model', u.model],
+  const kv = [['Type', t.label], ['Location', u.location], ['Size', u.size], ['Manufacturer', u.manufacturer], ['Device name', u.device_name], ['Model', u.model],
     ['Serial no.', u.serial_number], ['Inventory no.', u.inventory_number],
     ['Last defrost', u.last_defrost ? `${fmtDate(u.last_defrost)} (${ago(u.last_defrost)})` : null],
     ['Last PM', u.last_pm ? `${fmtDate(u.last_pm)} (${ago(u.last_pm)})` : null]].filter(([, v]) => v);
@@ -905,7 +984,8 @@ function unitSide(m) {
       h('div', { class: 'row', style: { marginTop: '10px' } },
         h('button', { class: 'btn sm', onclick: () => addChildrenDialog(m, null) }, '+ Add shelf'),
         h('a', { class: 'btn sm', href: `#/search?unit_id=${u.id}` }, 'List all items'),
-        h('a', { class: 'btn sm', href: `#/activity?unit_id=${u.id}` }, 'History'))),
+        h('a', { class: 'btn sm', href: `#/activity?unit_id=${u.id}` }, 'History'),
+        h('button', { class: 'btn sm', onclick: () => savePreset(m) }, 'Save as preset'))),
     state.me.role === 'admin' ? h('div', { class: 'card' },
       h('button', { class: 'btn danger sm', onclick: () => deleteUnit(m) }, 'Delete this storage unit…')) : null,
   ];
@@ -979,6 +1059,25 @@ function nodeSide(m, node) {
 }
 /** Where a rack / loose space sits: move left/right or to another shelf (keyboard-friendly twin of drag & drop). */
 function placeCard(m, node) {
+  const plan = node.level !== 'box' ? unitPlan(m.unit) : null;
+  if (plan && planFits(plan, kidsOf(m, node.parent_id))) {
+    const occupant = new Map(kidsOf(m, node.parent_id).map(p => [p.position, p]));
+    const sel = h('select', { class: 'input' }, plan.slots.map((sl, i) => {
+      const o = occupant.get(i);
+      return h('option', { value: i }, `${sl.name || 'Slot ' + (i + 1)}${o ? (o.id === node.id ? ' (here)' : ` — ${nodeLabel(o)} (swap)`) : ' — empty'}`);
+    }));
+    sel.value = String(node.position);
+    sel.onchange = async () => {
+      const o = occupant.get(+sel.value);
+      const body = o ? { parent_id: node.parent_id, swap_with: o.id } : { parent_id: node.parent_id, slot: +sel.value };
+      if (await attempt(() => api('POST', `/api/nodes/${node.id}/place`, body), o ? 'Swapped' : 'Moved')) refresh(); else refresh();
+    };
+    const slotName = plan.slots[node.position]?.name;
+    return h('div', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h3', null, 'Position'), h('span', { class: 'small muted' }, `slot ${slotName || node.position + 1}`)),
+      field('Slot', sel, 'picking a taken slot swaps the two'),
+      h('p', { class: 'small faint', style: { marginTop: '8px' } }, 'Or drag it onto another slot in the tank diagram (long-press on a phone).'));
+  }
   const sibs = kidsOf(m, node.parent_id);
   const i = sibs.findIndex(x => x.id === node.id);
   const isBox = node.level === 'box';
@@ -1124,6 +1223,19 @@ async function deleteNode(m, node) {
   if (!ok) return;
   if (await attempt(() => api('DELETE', `/api/nodes/${node.id}`), 'Deleted')) location.hash = nodeHref(m, node.parent_id);
 }
+function savePreset(m) {
+  const u = m.unit;
+  const name = inp('name', [u.manufacturer && u.manufacturer.split(' ')[0], u.device_name, u.model].filter(Boolean).join(' ') || u.name, { required: true });
+  const err = h('p', { class: 'error' });
+  const go = async () => {
+    try { await api('POST', '/api/presets', { from_unit: u.id, name: name.value }); close(); toast('Preset saved — pick it when adding a unit'); }
+    catch (x) { err.textContent = x.message; }
+  };
+  const close = openModal({ title: 'Save as preset', body: h('div', { class: 'stack' },
+      h('p', { class: 'small muted' }, `Saves ${u.name}'s type, manufacturer, device name, model, size and layout${unitPlan(u) ? ' (including its compartment arrangement)' : ''} so the next unit like it is one click away. Contents aren't copied.`),
+      field('Preset name', name), err),
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: go }, 'Save preset')] });
+}
 async function deleteUnit(m) {
   const typed = h('input', { class: 'input', placeholder: m.unit.name });
   const err = h('p', { class: 'error' });
@@ -1147,8 +1259,11 @@ async function deleteUnit(m) {
 async function viewUnitForm(uid) {
   const editing = !!uid;
   const u = editing ? (await api('GET', `/api/units/${uid}`)).unit : { type: '-80' };
+  const presets = editing ? [] : await api('GET', '/api/presets').catch(() => []);
   let type = u.type;
   let layoutTouched = false;
+  let plan = editing ? unitPlan(u) : null;     // rack arrangement from a preset (LN2 only)
+  const planActive = L => type === 'ln2' && !!plan && L.racks === plan.slots.length;
   const err = h('p', { class: 'error' });
   const sizeList = h('datalist', { id: 'size-list' });
   const typePick = h('div', { class: 'type-pick' });
@@ -1161,7 +1276,15 @@ async function viewUnitForm(uid) {
   sizeList.replaceChildren(...TYPES[type].sizes.map(s => h('option', { value: s })));
   const layoutBox = h('div');
   const preview = h('div');
+  const presetNote = h('p', { class: 'small muted' });
+  const presetSel = presets.length ? h('select', { class: 'input' }, h('option', { value: '' }, '— None: set it up myself —'),
+    TYPE_ORDER.filter(t => presets.some(p => p.type === t)).map(t => h('optgroup', { label: TYPES[t].label },
+      presets.filter(p => p.type === t).map(p => h('option', { value: p.id }, p.name))))) : null;
+  const planToggle = editing && plan ? h('input', { type: 'checkbox', checked: true }) : null;
   const form = h('form', { class: 'stack' },
+    presetSel ? h('div', { class: 'card stack' },
+      h('h2', null, 'Start from a preset'),
+      field('Common set-up', presetSel, 'fills in the details and layout below — all still editable'), presetNote) : null,
     h('div', { class: 'card stack' },
       h('h2', null, 'Storage type'), typePick,
       h('div', { class: 'grid2' },
@@ -1169,7 +1292,8 @@ async function viewUnitForm(uid) {
         field('Location', inp('location', u.location, { placeholder: 'Room, bench, corridor…', list: 'loc-list' })),
         field('Size', inp('size', u.size, { list: 'size-list', placeholder: 'Pick or type' })),
         field('Manufacturer', inp('manufacturer', u.manufacturer, { placeholder: 'e.g. Thermo Fisher' })),
-        field('Model', inp('model', u.model)),
+        field('Device name', inp('device_name', u.device_name, { placeholder: 'e.g. CryoExtra' }), "manufacturer's product name"),
+        field('Model', inp('model', u.model, { placeholder: 'e.g. CE8120' })),
         field('Serial number', inp('serial_number', u.serial_number)),
         field('Inventory number', inp('inventory_number', u.inventory_number)),
         field('Date of last defrost', inp('last_defrost', u.last_defrost, { type: 'date', max: todayISO() })),
@@ -1177,12 +1301,29 @@ async function viewUnitForm(uid) {
         field('Assigned to', ownerSelect(u.owner_id, u.is_common, 'Unassigned'), 'the whole unit', 'span-all'),
         field('Notes', h('textarea', { name: 'notes', class: 'input' }, u.notes || ''), null, 'span-all')),
       sizeList, h('datalist', { id: 'loc-list' })),
-    editing ? h('p', { class: 'small muted' }, 'To change shelves, racks, rows or boxes, open the unit and use the layout panel next to the diagram.') : layoutBox,
+    editing ? h('div', { class: 'stack' },
+      planToggle ? h('label', { class: 'row small' }, planToggle, `Use the tank's compartment arrangement (${plan.slots.map(x => x.name).filter(Boolean).slice(0, 1)}–${plan.slots.map(x => x.name).filter(Boolean).slice(-1)} slots). Unticking switches to a plain round layout and can't be undone here.`) : null,
+      h('p', { class: 'small muted' }, 'To change shelves, racks, rows or boxes, open the unit and use the layout panel next to the diagram.')) : layoutBox,
     err,
     h('div', { class: 'row' },
       h('button', { class: 'btn primary', type: 'submit' }, editing ? 'Save changes' : 'Create storage unit'),
       h('a', { class: 'btn', href: editing ? `#/unit/${uid}` : '#/' }, 'Cancel')));
   drawTypes();
+
+  if (presetSel) presetSel.onchange = () => {
+    const p = presets.find(x => String(x.id) === presetSel.value);
+    if (!p) { plan = null; presetNote.textContent = ''; drawPreview(); return; }
+    type = p.type; drawTypes();
+    sizeList.replaceChildren(...TYPES[type].sizes.map(sz => h('option', { value: sz })));
+    for (const k of ['manufacturer', 'device_name', 'model', 'size']) { const el = form.querySelector(`[name=${k}]`); if (el && p[k] != null) el.value = p[k]; }
+    for (const [k, v] of Object.entries(p.layout)) { const el = layoutBox.querySelector(`[name=${k}]`); if (el) el.value = v; }
+    layoutBox.querySelector('[name=grid_rows]')?.dispatchEvent(new Event('input'));
+    plan = p.plan;
+    layoutTouched = true;
+    presetNote.textContent = [p.notes, plan ? `Racks are named ${plan.slots[0].name}–${plan.slots[plan.slots.length - 1].name} and placed as in the tank.` : null,
+      'Check the rack contents (rows, boxes per row, box format) match yours.'].filter(Boolean).join(' ');
+    drawPreview();
+  };
 
   // Fill location suggestions from existing units.
   api('GET', '/api/units').then(list => {
@@ -1233,25 +1374,33 @@ async function viewUnitForm(uid) {
       }
     };
     mk(null, 'shelf', L.shelves);
-    const m = buildModel({ unit: { id: 0, name: formData(form).name || 'New unit', type, manufacturer: formData(form).manufacturer }, nodes, items: [] });
+    const usePlan = planActive(L);
+    if (usePlan) for (const n of nodes) if (n.level === 'rack') n.name = plan.slots[n.position].name || null;
+    const m = buildModel({ unit: { id: 0, name: formData(form).name || 'New unit', type, manufacturer: formData(form).manufacturer, plan: usePlan ? plan : null }, nodes, items: [] });
     const diagram = type === 'ln2' ? dewarView(m) : cabinetView(m);
     for (const el of diagram.querySelectorAll('[data-href]')) el.removeAttribute('data-href');
     for (const el of diagram.querySelectorAll('a')) el.removeAttribute('href');
     preview.replaceChildren(h('div', { class: `card ${TYPES[type].cls}` },
       h('div', { class: 'card-head' }, h('h3', null, 'Preview'), h('span', { class: 'small muted' },
-        `${nb.toLocaleString()} boxes · ${(nb * L.grid_rows * L.grid_cols).toLocaleString()} positions`)), diagram));
+        `${nb.toLocaleString()} boxes · ${(nb * L.grid_rows * L.grid_cols).toLocaleString()} positions`)),
+      plan && type === 'ln2' && !usePlan ? h('p', { class: 'notice', style: { marginBottom: '10px' } },
+        `The preset's compartment arrangement needs exactly ${plan.slots.length} racks per tier, so a plain round layout is shown.`) : null,
+      diagram));
   }
   form.addEventListener('input', e => { if (e.target.name === 'name') drawPreview(); });
 
   form.onsubmit = async e => {
     e.preventDefault(); err.textContent = '';
     const v = formData(form);
-    const body = { type, name: v.name, location: v.location, size: v.size, manufacturer: v.manufacturer, model: v.model,
+    const body = { type, name: v.name, location: v.location, size: v.size, manufacturer: v.manufacturer, device_name: v.device_name, model: v.model,
       serial_number: v.serial_number, inventory_number: v.inventory_number, last_defrost: v.last_defrost, last_pm: v.last_pm,
       notes: v.notes, ...ownerPayload(v.owner) };
     try {
-      if (editing) { await api('PUT', `/api/units/${uid}`, body); toast('Saved'); location.hash = `#/unit/${uid}`; }
-      else { body.layout = readLayout(); const r = await api('POST', '/api/units', body); toast('Storage unit created'); location.hash = `#/unit/${r.id}`; }
+      if (editing) {
+        if (planToggle && !planToggle.checked) body.plan = null;
+        await api('PUT', `/api/units/${uid}`, body); toast('Saved'); location.hash = `#/unit/${uid}`;
+      }
+      else { body.layout = readLayout(); if (planActive(body.layout)) body.plan = plan; const r = await api('POST', '/api/units', body); toast('Storage unit created'); location.hash = `#/unit/${r.id}`; }
     } catch (x) { err.textContent = x.message; }
   };
   setTimeout(drawPreview, 0);
@@ -1540,6 +1689,24 @@ async function viewActivity(query) {
 // ------------------------------------------------------------------------ //
 async function viewSettings() {
   await loadRefs();
+  const presets = await api('GET', '/api/presets').catch(() => []);
+  const presetCard = h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'Storage presets')),
+    h('p', { class: 'small muted', style: { marginBottom: '8px' } }, 'Ready-made set-ups for common models, offered when you add a unit. To add one, set a unit up the way you want, then use “Save as preset” on its page.'),
+    presets.length ? presets.map(p => {
+      const name = h('input', { class: 'input', value: p.name });
+      name.addEventListener('change', () => attempt(() => api('PUT', `/api/presets/${p.id}`, { name: name.value }), 'Preset renamed'));
+      const L = p.layout;
+      const summary = [[p.manufacturer, p.device_name, p.model].filter(Boolean).join(' · '),
+        `${plural(L.shelves, 'shelf').replace('shelfs', 'shelves')} × ${plural(L.racks, 'rack')} × ${plural(L.rows, 'row')} × ${plural(L.boxes, 'box').replace('boxs', 'boxes')} (${L.grid_rows}×${L.grid_cols})`,
+        p.plan ? `compartment arrangement ${p.plan.slots[0].name}–${p.plan.slots[p.plan.slots.length - 1].name}` : null].filter(Boolean).join(' — ');
+      return h('div', { class: 'preset-row' },
+        h('span', { class: `type-badge ${TYPES[p.type].cls}` }, TYPES[p.type].short),
+        h('div', { style: { flex: 1, minWidth: 0 } }, name, h('div', { class: 'small faint', style: { marginTop: '3px' } }, summary)),
+        h('button', { class: 'btn sm ghost danger', title: 'Delete preset', onclick: async () => {
+          if (!await confirmBox(`Delete preset “${p.name}”?`, 'Units already created from it are not affected.', { okText: 'Delete', danger: true })) return;
+          if (await attempt(() => api('DELETE', `/api/presets/${p.id}`), 'Preset deleted')) refresh();
+        } }, '✕'));
+    }) : h('p', { class: 'small faint' }, 'No presets yet.'));
   const isAdmin = state.me.role === 'admin';
 
   // Categories
@@ -1624,6 +1791,7 @@ async function viewSettings() {
       h('p', { class: 'small muted', style: { marginBottom: '8px' } }, 'Colours are used for tubes in the box diagrams. Changes save automatically.'),
       catList,
       h('form', { class: 'cat-row', style: { marginTop: '8px' }, onsubmit: addCat }, newCatColor, newCatName, h('button', { class: 'btn', type: 'submit' }, 'Add'))),
+    presetCard,
     h('div', { class: 'card' }, h('div', { class: 'card-head' }, h('h2', null, 'People')),
       h('p', { class: 'small muted', style: { marginBottom: '8px' } }, 'Anyone here can be assigned to a whole unit, a shelf, rack, row, box or a single item. Mark things “Common” for shared lab stock.'),
       h('div', { class: 'table-wrap' }, userTable),

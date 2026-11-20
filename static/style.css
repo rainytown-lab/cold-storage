@@ -456,3 +456,16 @@ body.is-dragging, body.is-dragging * { cursor: grabbing !important; user-select:
 .loc-cab .loc-cell { height: auto; }
 .loc-dewar { width: 76px; height: 76px; }
 .page-head:has(.locator) { align-items: center; }
+
+/* Arranged LN2 tanks (compartment slots) */
+.dewar .divider, .loc-dewar .divider { stroke: var(--steel-dark); stroke-width: 2; }
+.loc-dewar .divider { stroke-width: 1; }
+.dewar .slot-empty rect { fill: transparent; stroke: var(--steel-dark); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.dewar .slot-empty text { font-size: 11px; font-weight: 600; fill: var(--text-faint); text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+.dewar .rk.drop-swap rect, .dewar .slot-empty.drop-swap rect { stroke: var(--primary); stroke-width: 3; stroke-dasharray: none; }
+.loc-dewar rect { fill: var(--surface-3); stroke: var(--steel-dark); stroke-width: .6; cursor: pointer; }
+.loc-dewar rect.empty { fill: transparent; stroke-dasharray: 1.5 1; cursor: default; }
+.loc-dewar rect.space { fill: var(--surface); stroke-dasharray: 2 1.5; }
+.loc-dewar rect.on { fill: var(--primary); stroke: var(--primary); }
+.preset-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--border); }
+.preset-row .type-badge { margin-top: 8px; }

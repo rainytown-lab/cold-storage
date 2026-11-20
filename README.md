@@ -20,6 +20,15 @@ admin adds everyone else under **Settings › People**.
 - **Storage units**: LN₂, −80 °C, −20 °C, +4 °C. Each one has a name, location,
   size, manufacturer, model, serial number, inventory number, date of last defrost,
   date of last PM, notes, and an owner (or **Common**).
+- **Presets**: when you add a unit, you can start from a ready-made set-up for a
+  common model. It fills in the type, manufacturer, device name, model, size and
+  layout, and everything stays editable. The built-in preset is the Thermo
+  CryoExtra CE8120 LN₂ tank: four compartments (A–D) of three racks each, drawn in
+  their real places. Any unit can be saved as a new preset ("Save as preset" on
+  its page). Presets are managed under Settings.
+- **Arranged tanks**: in a tank whose racks sit in fixed compartment slots,
+  dragging a rack onto another rack swaps them, and dragging it onto an empty slot
+  moves it there. The rack page has a matching Slot picker.
 - **Layout**: unit › shelf › rack › row › box › position. You set the counts when
   you create a unit, and a live preview shows the result. After that you can add,
   delete, rename or reassign any shelf, rack, row or box, and resize a box

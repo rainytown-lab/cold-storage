@@ -14,6 +14,7 @@ Items live either in a box position (node = box, pos_row/pos_col set) or
 "loose" — directly in a unit (node_id NULL) or on a shelf (node = shelf).
 """
 
+import json
 import os
 import sqlite3
 import threading
@@ -73,6 +74,7 @@ CREATE TABLE IF NOT EXISTS units (
     location   TEXT,
     size       TEXT,
     manufacturer     TEXT,
+    device_name      TEXT,             -- manufacturer's device/product name, e.g. "CryoExtra"
     model            TEXT,
     serial_number    TEXT,
     inventory_number TEXT,
@@ -81,7 +83,23 @@ CREATE TABLE IF NOT EXISTS units (
     notes      TEXT,
     owner_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
     is_common  INTEGER NOT NULL DEFAULT 0,
+    plan       TEXT,                   -- JSON rack arrangement for LN2 tanks (see PLAN below), NULL = ring
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Ready-made set-ups for common models (picked when adding a unit; all values stay editable).
+CREATE TABLE IF NOT EXISTS presets (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    name         TEXT NOT NULL,
+    type         TEXT NOT NULL,
+    manufacturer TEXT,
+    device_name  TEXT,
+    model        TEXT,
+    size         TEXT,
+    layout       TEXT NOT NULL,        -- JSON {shelves, racks, rows, boxes, grid_rows, grid_cols, label_style}
+    plan         TEXT,                 -- JSON rack arrangement, optional
+    notes        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS nodes (
@@ -160,6 +178,35 @@ DEFAULT_CATEGORIES = [
 ]
 
 
+# A "plan" places a tank's racks on a grid instead of a ring, as seen from above.
+# slots are listed in rack order (rack position 0 sits in slots[0], …); c/r are grid
+# column/row; "dividers" draws the compartment walls through the centre.
+CE8120_PLAN = {
+    "cols": 4, "rows": 4, "dividers": True,
+    "slots": [
+        {"name": "A1", "c": 1, "r": 0}, {"name": "A2", "c": 1, "r": 1}, {"name": "A3", "c": 0, "r": 1},
+        {"name": "B1", "c": 3, "r": 1}, {"name": "B2", "c": 2, "r": 1}, {"name": "B3", "c": 2, "r": 0},
+        {"name": "C1", "c": 0, "r": 2}, {"name": "C2", "c": 1, "r": 2}, {"name": "C3", "c": 1, "r": 3},
+        {"name": "D1", "c": 2, "r": 3}, {"name": "D2", "c": 2, "r": 2}, {"name": "D3", "c": 3, "r": 2},
+    ],
+}
+
+BUILTIN_PRESETS = [
+    {
+        "name": "Thermo CryoExtra CE8120 (LN₂)",
+        "type": "ln2",
+        "manufacturer": "Thermo Fisher Scientific Inc (ECRI™)",
+        "device_name": "CryoExtra",
+        "model": "CE8120",
+        # 4 compartments × 3 racks. Rack contents are a starting guess — adjust to your racks.
+        "layout": {"shelves": 1, "racks": 12, "rows": 12, "boxes": 1, "grid_rows": 9, "grid_cols": 9,
+                   "label_style": "grid"},
+        "plan": CE8120_PLAN,
+        "notes": "Four compartments (A–D), three racks each.",
+    },
+]
+
+
 def init_db():
     conn = get_conn()
     conn.executescript(SCHEMA)
@@ -167,6 +214,19 @@ def init_db():
     cols = {r[1] for r in conn.execute("PRAGMA table_info(nodes)")}
     if "span" not in cols:
         conn.execute("ALTER TABLE nodes ADD COLUMN span INTEGER NOT NULL DEFAULT 1")
+    ucols = {r[1] for r in conn.execute("PRAGMA table_info(units)")}
+    for col in ("device_name", "plan"):
+        if col not in ucols:
+            conn.execute(f"ALTER TABLE units ADD COLUMN {col} TEXT")
+    # Seed the built-in presets once (deleting one later doesn't bring it back).
+    if not conn.execute("SELECT 1 FROM settings WHERE key = 'presets_seeded'").fetchone():
+        for p in BUILTIN_PRESETS:
+            conn.execute(
+                "INSERT INTO presets (name, type, manufacturer, device_name, model, size, layout, plan, notes)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
+                (p["name"], p["type"], p["manufacturer"], p["device_name"], p["model"], p.get("size"),
+                 json.dumps(p["layout"]), json.dumps(p["plan"]) if p.get("plan") else None, p.get("notes")))
+        conn.execute("INSERT INTO settings (key, value) VALUES ('presets_seeded', '1')")
     if conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 0:
         conn.executemany(
             "INSERT INTO categories (name, color, sort) VALUES (?, ?, ?)",
