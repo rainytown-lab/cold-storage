@@ -1,0 +1,19 @@
+# Never ship the database or local cruft into the image — the DB lives on the
+# mounted volume, and it contains real lab data.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+backups/
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.git
+.gitignore
+.claude
+*.log
+.DS_Store

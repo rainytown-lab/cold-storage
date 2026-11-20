@@ -127,3 +127,18 @@ under **Settings › People**, with a temporary password. Sign out from the top 
 - `app.py`: HTTP server and JSON API
 - `db.py`: SQLite schema
 - `static/`: `index.html`, `app.js`, `style.css`
+
+## Live site (Fly.io)
+
+The lab's copy runs on Fly.io as app `coldstorage` (https://coldstorage.fly.dev), with
+the database on a persistent volume at `/data/coldstorage.db`. Code lives in the
+private GitHub repo `rainytown-lab/cold-storage`.
+
+```bash
+fly deploy                      # ship the current code (from this folder)
+fly logs                        # watch the live server
+fly ssh sftp get /data/coldstorage.db   # download a copy of the live database
+```
+
+Keep it to one machine (SQLite has a single writer). The database is never part of
+the image or the repo.

@@ -1,0 +1,31 @@
+# Fly.io configuration for Cold Storage.
+#
+# One always-on machine + a persistent volume for the single SQLite file.
+# SQLite has ONE writer, so keep this to exactly one machine (`fly scale count 1`).
+
+app = "coldstorage"
+primary_region = "ewr"   # Secaucus, NJ — same region as Mouse House
+
+[build]
+
+[env]
+  PORT = "8080"
+  COLDSTORAGE_DB = "/data/coldstorage.db"   # on the mounted volume below
+  COLDSTORAGE_SECURE_COOKIE = "1"           # login cookie only over HTTPS (Fly serves HTTPS)
+  COLDSTORAGE_QUIET = "1"                   # don't log every request
+
+# Persistent disk for the database — survives deploys and restarts.
+[mounts]
+  source = "coldstorage_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true            # redirect http -> https
+  auto_stop_machines = "off"    # always on; no cold starts
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

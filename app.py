@@ -27,6 +27,9 @@ import db
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 SESSION_DAYS = 30
 COOKIE = "cs_session"
+# Add "Secure" to the login cookie (only sent over HTTPS). Off for local/LAN use;
+# on in production behind HTTPS (fly.toml sets COLDSTORAGE_SECURE_COOKIE=1).
+SECURE_COOKIE = os.environ.get("COLDSTORAGE_SECURE_COOKIE", "").lower() in ("1", "true", "yes")
 MAX_BODY = 4 * 1024 * 1024
 
 UNIT_TYPES = ("ln2", "-80", "-20", "+4")
@@ -1832,7 +1835,7 @@ class Handler(BaseHTTPRequestHandler):
         if cookie is not None:
             if cookie:
                 self.send_header("Set-Cookie", f"{COOKIE}={cookie}; Path=/; HttpOnly; SameSite=Lax; "
-                                               f"Max-Age={SESSION_DAYS * 86400}")
+                                               f"Max-Age={SESSION_DAYS * 86400}" + ("; Secure" if SECURE_COOKIE else ""))
             else:
                 self.send_header("Set-Cookie", f"{COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
         self.end_headers()
