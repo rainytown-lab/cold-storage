@@ -711,3 +711,9 @@ h1 { font-size: 26px; font-weight: 750; }
 .field-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto; gap: 8px; align-items: center; }
 .field-row > input[placeholder^="Options"] { grid-column: 1 / -1; }
 @media (max-width: 560px) { .field-row { grid-template-columns: 1fr auto; } .field-row > select { grid-column: 1 / -1; } }
+
+/* Drag-selecting a section of a box */
+.box-grid.selecting .cell { touch-action: none; }
+.cell.sel-preview { box-shadow: 0 0 0 3px var(--primary) !important; background: var(--primary-soft); z-index: 1; }
+.cell.filled.sel-preview { background: color-mix(in srgb, var(--primary) 22%, var(--surface)); }
+.box-grid.replacing .cell.sel:not(.sel-preview) { box-shadow: none !important; }

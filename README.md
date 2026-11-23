@@ -72,8 +72,9 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   Settings › Item categories › Fields… (text, long text, number, date or dropdown).
   These details show on the item's page, are searchable, and are exported to CSV.
   Click an empty position to add an item; "Number of tubes" fills the next N
-  positions with aliquots. Shift-click (or "Select positions") selects several at
-  once to add or remove in bulk.
+  positions with aliquots. Drag across a box to select a whole section (on a phone,
+  tap "Select positions" first), or shift-click individual positions, then add or
+  remove in bulk.
 - **Loose items**: things that aren't in a box always live in a **loose space**,
   a drawn section of the shelf or tank (like a tube lives in a box), with an
   optional free-text spot ("door", "bottom bin"). Loose items left outside a loose

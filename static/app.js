@@ -1226,7 +1226,7 @@ function boxView(m, box, query) {
   const hlId = query.hl ? +query.hl : null;
   const R = box.grid_rows, C = box.grid_cols;
   const compact = C > 12;
-  const g = h('div', { class: 'box-grid' + (compact ? ' compact' : ''), style: { gridTemplateColumns: `22px repeat(${C}, minmax(0, 1fr))` } });
+  const g = h('div', { class: 'box-grid' + (compact ? ' compact' : '') + (sel.on ? ' selecting' : ''), style: { gridTemplateColumns: `22px repeat(${C}, minmax(0, 1fr))` } });
   g.append(h('div'));
   for (let c = 0; c < C; c++) g.append(h('div', { class: 'hdr' }, box.label_style === 'number' ? '' : c + 1));
   for (let r = 0; r < R; r++) {
@@ -1235,6 +1235,7 @@ function boxView(m, box, query) {
       const key = r + ',' + c, it = grid.get(key), pl = posLabel(box, r, c);
       const dim = it && !ownerMatch(itemOwner(m, it));
       const cell = h('div', {
+        'data-r': r, 'data-c': c,
         class: 'cell ' + (it ? 'filled' : 'empty') + (sel.cells.has(key) ? ' sel' : '') + (it && it.id === hlId ? ' hl' : '') + (dim ? ' dim' : ''),
         style: it ? { '--cc': catColor(it.category_id) } : null,
         title: it ? `${pl}: ${it.name}${it.category_id ? ' · ' + state.catsById.get(it.category_id)?.name : ''}${it.quantity ? ' · ' + it.quantity : ''}` : `${pl} — empty`,
@@ -1243,12 +1244,13 @@ function boxView(m, box, query) {
       g.append(cell);
     }
   }
+  enableBoxDragSelect(g, box);
   const nSel = sel.cells.size;
   const selItems = [...sel.cells].map(k => grid.get(k)).filter(Boolean);
   const selEmpty = [...sel.cells].filter(k => !grid.has(k));
   const toolbar = h('div', { class: 'toolbar' },
     h('button', { class: 'btn sm' + (sel.on ? ' on' : ''), onclick: () => { sel.on = !sel.on; if (!sel.on) sel.cells.clear(); refresh(); } }, sel.on ? 'Done selecting' : 'Select positions'),
-    nSel ? h('span', { class: 'small muted' }, `${nSel} selected`) : h('span', { class: 'small faint' }, sel.on ? 'Click positions to select them' : 'Tip: shift-click to select several'),
+    nSel ? h('span', { class: 'small muted' }, `${nSel} selected`) : h('span', { class: 'small faint' }, sel.on ? 'Click positions, or drag across a section' : 'Tip: drag across positions to select a section'),
     selEmpty.length ? h('button', { class: 'btn sm primary', onclick: () => openItemForm({ m, box, positions: selEmpty.map(k => k.split(',').map(Number)) }) }, `+ Add item to ${plural(selEmpty.length, 'position')}`) : null,
     selItems.length ? h('button', { class: 'btn sm danger', onclick: () => removeDialog(selItems, () => { sel.cells.clear(); refresh(); }) }, `Remove ${plural(selItems.length, 'item')}`) : null,
     nSel ? h('button', { class: 'btn sm ghost', onclick: () => { sel.cells.clear(); refresh(); } }, 'Clear') : null);
@@ -1272,7 +1274,60 @@ function catLabel(id) {
   const c = state.catsById.get(id);
   return c ? h('span', { class: 'row', style: { gap: '6px', flexWrap: 'nowrap' } }, h('i', { class: 'dot', style: { background: c.color } }), c.name) : h('span', { class: 'faint' }, '—');
 }
+/** Drag across a box to select a rectangle of positions. Mouse: any time. Touch: in "Select positions"
+ *  mode, so a normal swipe still scrolls the page. Shift/Cmd or select mode adds to the selection. */
+function enableBoxDragSelect(grid, box) {
+  grid.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || state.moving || boxDrag.active) return;
+    const start = e.target.closest('.cell');
+    const sel = state.boxSel;
+    if (!start || (e.pointerType !== 'mouse' && !sel.on)) return;
+    const r0 = +start.dataset.r, c0 = +start.dataset.c;
+    const adding = sel.on || e.shiftKey || e.metaKey || e.ctrlKey;
+    const cells = [...grid.querySelectorAll('.cell')];
+    let rect = null;
+    // The position under the pointer, clamped so dragging past an edge selects up to that edge.
+    const at = (x, y) => {
+      const a = cells[0].getBoundingClientRect(), b = cells[cells.length - 1].getBoundingClientRect();
+      const px = box.grid_cols > 1 ? (b.left - a.left) / (box.grid_cols - 1) : 1, py = box.grid_rows > 1 ? (b.top - a.top) / (box.grid_rows - 1) : 1;
+      return [Math.max(0, Math.min(box.grid_rows - 1, Math.floor((y - a.top + (py - a.height) / 2) / py))),
+              Math.max(0, Math.min(box.grid_cols - 1, Math.floor((x - a.left + (px - a.width) / 2) / px)))];
+    };
+    const inRect = el => rect && +el.dataset.r >= rect[0] && +el.dataset.r <= rect[2] && +el.dataset.c >= rect[1] && +el.dataset.c <= rect[3];
+    const paint = () => { grid.classList.toggle('replacing', !!rect && !adding); for (const el of cells) el.classList.toggle('sel-preview', !!inRect(el)); };
+    const stop = () => {
+      boxDrag.active = false;
+      document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up);
+      document.removeEventListener('pointercancel', cancel); document.removeEventListener('keydown', key);
+    };
+    const move = ev => {
+      if (ev.pointerId !== e.pointerId) return;
+      const [r, c] = at(ev.clientX, ev.clientY);
+      if (!rect && r === r0 && c === c0) return;       // still a plain click
+      rect = [Math.min(r0, r), Math.min(c0, c), Math.max(r0, r), Math.max(c0, c)];
+      ev.preventDefault();
+      paint();
+    };
+    const up = ev => {
+      if (ev.pointerId !== e.pointerId) return;
+      stop();
+      if (!rect) return;
+      boxDrag.suppressClickUntil = Date.now() + 300;
+      if (!adding) sel.cells.clear();
+      for (let r = rect[0]; r <= rect[2]; r++) for (let c = rect[1]; c <= rect[3]; c++) sel.cells.add(r + ',' + c);
+      sel.on = true;
+      refresh();
+    };
+    const cancel = () => { stop(); rect = null; paint(); };
+    const key = ev => { if (ev.key === 'Escape') { if (rect) boxDrag.suppressClickUntil = Date.now() + 300; cancel(); } };
+    boxDrag.active = true;
+    document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
+    document.addEventListener('pointercancel', cancel); document.addEventListener('keydown', key);
+  });
+}
+const boxDrag = { active: false, suppressClickUntil: 0 };
 async function onCell(e, m, box, r, c, it) {
+  if (Date.now() < boxDrag.suppressClickUntil) return;   // the click that ends a drag-selection
   const key = r + ',' + c, sel = state.boxSel;
   if (state.moving && !it) {
     const mv = state.moving;
