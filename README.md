@@ -75,6 +75,13 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   positions with aliquots. Drag across a box to select a whole section (on a phone,
   tap "Select positions" first), or shift-click individual positions, then add or
   remove in bulk.
+- **Paste from Excel**: copy cells, point at a position in a box (or select a section),
+  and press Cmd/Ctrl+V. Each non-blank cell becomes an item. The paste must fit the box
+  or the selected section. Replacing stored items asks first, logs them as removed, and
+  the whole paste can be undone.
+- **Edit several items**: select filled positions and choose "Edit N items" to change
+  category, owner, quantity, dates, notes or category details. Only ticked fields
+  change, and the whole edit can be undone from the Log.
 - **Loose items**: things that aren't in a box always live in a **loose space**,
   a drawn section of the shelf or tank (like a tube lives in a box), with an
   optional free-text spot ("door", "bottom bin"). Loose items left outside a loose

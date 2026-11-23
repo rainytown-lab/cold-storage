@@ -48,7 +48,7 @@ SHELF_CHILDREN = ("rack", "space")   # things that sit side by side on a shelf
 MAX_SPAN = 30
 
 # Bump when the API changes, so an already-open page can tell the server needs a restart.
-API_VERSION = 15
+API_VERSION = 17
 LAYOUT_KEYS = {"shelf": "shelves", "rack": "racks", "row": "rows", "box": "boxes"}
 LAYOUT_MAX = {"shelves": 30, "racks": 30, "rows": 40, "boxes": 40}
 MAX_BOXES_PER_UNIT = 6000
@@ -815,7 +815,7 @@ def get_unit(ctx):
         " label_style, notes FROM nodes WHERE unit_id = ? ORDER BY position, id", (uid,)))
     items = rows(conn.execute("""
         SELECT id, name, category_id, node_id, pos_row, pos_col, owner_id, is_common, quantity,
-               concentration, loose_where, date_added, expiry_date
+               concentration, source, lot, notes, extra, loose_where, date_added, expiry_date
         FROM items WHERE unit_id = ? AND status = 'stored'""", (uid,)))
     return {"unit": unit, "nodes": nodes, "items": items}
 
@@ -1577,6 +1577,110 @@ def _remove(ctx, it, date, reason, tree):
                         (date, ctx["user"]["id"], reason, loc, it["id"]))
     log(ctx, "item.remove", f"Removed “{it['name']}” from {loc}" + (f" — {reason}" if reason else ""),
         item_id=it["id"], unit_id=it["unit_id"])
+
+
+BULK_ITEM_FIELDS = {"name", "category_id", "owner_id", "is_common", "quantity", "concentration", "source", "lot",
+                    "expiry_date", "date_added", "notes"}
+
+
+@route("POST", "/api/items/bulk-edit")
+def bulk_edit_items(ctx):
+    """Change the same fields on several stored items, all or nothing: {item_ids, changes: {field: value},
+    extra: {detail key: value}}. Fields not sent are kept; a blank detail value clears just that detail."""
+    conn, b = ctx["conn"], ctx["body"]
+    raw = b.get("item_ids")
+    require(isinstance(raw, list) and raw, "Select at least one item")
+    require(len(raw) <= 500, "Too many items at once")
+    ids = [as_int(i, "Item", allow_none=False) for i in raw]
+    require(len(set(ids)) == len(ids), "Duplicate items")
+    changes, patch = b.get("changes") or {}, b.get("extra") or {}
+    require(isinstance(changes, dict) and isinstance(patch, dict) and len(patch) <= 40, "Bad changes")
+    require(changes or patch, "Choose at least one field to change")
+    require(set(changes) <= BULK_ITEM_FIELDS, "That field can't be bulk edited")
+    if "date_added" in changes:
+        require(changes["date_added"], "Date added can't be blank")
+    vals = _item_values(conn, changes, partial=True)
+    patch = {re.sub(r"[^a-z0-9_]", "", str(k).lower())[:40]: str(v or "").strip()[:2000] for k, v in patch.items()}
+    require("" not in patch, "Bad details")
+    found = rows(conn.execute(f"SELECT * FROM items WHERE id IN ({','.join('?' * len(ids))})", ids))
+    require(len(found) == len(ids) and all(it["status"] == "stored" for it in found),
+            "Some of these items changed or were removed, so nothing was saved. Refresh and try again.", 409)
+    updated = 0
+    for old in found:
+        new = dict(vals)
+        if patch:
+            try:
+                cur = json.loads(old["extra"]) if old["extra"] else {}
+            except ValueError:
+                cur = {}
+            merged = {k: v for k, v in {**cur, **patch}.items() if v}
+            if merged != cur:
+                new["extra"] = json.dumps(merged) if merged else None
+        changed = [k for k, v in new.items() if old.get(k) != v]
+        if not changed:
+            continue
+        conn.execute(f"UPDATE items SET {', '.join(k + ' = ?' for k in changed)}, updated_at = datetime('now') WHERE id = ?",
+                     (*[new[k] for k in changed], old["id"]))
+        nice = ", ".join(dict.fromkeys("details" if k == "extra" else "owner" if k == "is_common"
+                                       else k.replace("_id", "").replace("_", " ") for k in changed))
+        log(ctx, "item.edit", f"Bulk edited “{new.get('name', old['name'])}” ({nice})", item_id=old["id"], unit_id=old["unit_id"])
+        updated += 1
+    conn.commit()
+    return {"updated": updated, "unchanged": len(found) - updated}
+
+
+@route("POST", "/api/items/paste")
+def paste_items(ctx):
+    """Paste a block of names into a box, all or nothing: {node_id, cells: [{r, c, name}], category_id,
+    overwrite_ids}. Occupied positions are only replaced if their item is listed in overwrite_ids;
+    otherwise nothing changes and the conflicts are returned. Same-name positions are left alone."""
+    conn, b = ctx["conn"], ctx["body"]
+    node_id = as_int(b.get("node_id"), "Box", allow_none=False)
+    box = one(conn.execute("SELECT * FROM nodes WHERE id = ? AND level = 'box'", (node_id,)))
+    require(box, "Box not found", 404)
+    raw = b.get("cells")
+    require(isinstance(raw, list) and raw, "Nothing to paste")
+    require(len(raw) <= box["grid_rows"] * box["grid_cols"], "That's more than this box holds")
+    cells, seen = [], set()
+    for cell in raw:
+        require(isinstance(cell, dict), "Bad paste")
+        r, c = as_int(cell.get("r"), "Row", 0, allow_none=False), as_int(cell.get("c"), "Column", 0, allow_none=False)
+        require(r < box["grid_rows"] and c < box["grid_cols"], "The pasted section doesn't fit in this box")
+        require((r, c) not in seen, "Duplicate position")
+        seen.add((r, c))
+        name = str(cell.get("name") or "").strip()
+        require(name, "Blank cells can't be pasted")
+        require(len(name) <= 200, "Item names can be at most 200 characters")
+        cells.append((r, c, name))
+    allowed = {as_int(i, "id") for i in (b.get("overwrite_ids") or [])}
+    tree = Tree(conn, box["unit_id"])
+    current = {(it["pos_row"], it["pos_col"]): it for it in rows(conn.execute(
+        "SELECT * FROM items WHERE node_id = ? AND status = 'stored'", (node_id,)))}
+    todo, replace, unchanged = [], [], 0
+    for r, c, name in cells:
+        old = current.get((r, c))
+        if old and old["name"] == name:
+            unchanged += 1
+            continue
+        if old:
+            replace.append(old)
+        todo.append((r, c, name))
+    missing = [it for it in replace if it["id"] not in allowed]
+    if missing:
+        return {"created": 0, "conflicts": [{"id": it["id"], "name": it["name"],
+                                             "pos": tree.pos_label(tree.nodes[node_id], it["pos_row"], it["pos_col"])}
+                                            for it in missing]}
+    vals = _item_values(conn, {"name": "pasted", "category_id": b.get("category_id")})
+    for it in replace:
+        _remove(ctx, it, today(), "Replaced by paste", tree)
+    for r, c, name in todo:
+        cols = dict(vals, name=name, unit_id=box["unit_id"], node_id=node_id, pos_row=r, pos_col=c,
+                    added_by=ctx["user"]["id"], status="stored")
+        cols["last_location"] = tree.location(cols)["text"]
+        cur = conn.execute(f"INSERT INTO items ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(cols.values()))
+        log(ctx, "item.add", f"Pasted “{name}” into {cols['last_location']}", item_id=cur.lastrowid, unit_id=box["unit_id"])
+    conn.commit()
+    return {"created": len(todo), "replaced": len(replace), "unchanged": unchanged}
 
 
 @route("POST", "/api/items/remove")

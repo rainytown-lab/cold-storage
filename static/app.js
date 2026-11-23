@@ -19,7 +19,7 @@ const TYPES = {
            sizes: ['Upright, 23 cu ft', 'Upright, 49 cu ft (double door)', 'Undercounter, 5 cu ft', 'Chromatography fridge'] },
 };
 const TYPE_ORDER = ['ln2', '-80', '-20', '+4'];
-const API_VERSION = 15;   // must match API_VERSION in app.py
+const API_VERSION = 17;   // must match API_VERSION in app.py
 const LEVEL = { shelf: 'Shelf', rack: 'Rack', row: 'Row', box: 'Box', space: 'Loose space', bin: 'Container' };
 const LAYOUT_KEY = { shelf: 'shelves', rack: 'racks', row: 'rows', box: 'boxes' };
 // Levels per storage type. LN2 tanks have no shelves or rows: racks stand in the tank and
@@ -241,6 +241,8 @@ function parseHash() {
 async function route() {
   if (!state.me) return;
   const seq = ++state.renderSeq;
+  state.boxPaste = null;
+  state.boxHover = null;
   const { parts, query } = parseHash();
   const top = parts[0] || '';
   for (const a of document.querySelectorAll('#nav a')) {
@@ -1245,13 +1247,21 @@ function boxView(m, box, query) {
     }
   }
   enableBoxDragSelect(g, box);
+  g.addEventListener('pointerover', e => {
+    if (e.pointerType !== 'mouse') return;
+    const el = e.target.closest('.cell');
+    if (el) state.boxHover = [+el.dataset.r, +el.dataset.c];
+  });
+  g.addEventListener('pointerleave', () => { state.boxHover = null; });
+  state.boxPaste = { m, box };
   const nSel = sel.cells.size;
   const selItems = [...sel.cells].map(k => grid.get(k)).filter(Boolean);
   const selEmpty = [...sel.cells].filter(k => !grid.has(k));
   const toolbar = h('div', { class: 'toolbar' },
     h('button', { class: 'btn sm' + (sel.on ? ' on' : ''), onclick: () => { sel.on = !sel.on; if (!sel.on) sel.cells.clear(); refresh(); } }, sel.on ? 'Done selecting' : 'Select positions'),
-    nSel ? h('span', { class: 'small muted' }, `${nSel} selected`) : h('span', { class: 'small faint' }, sel.on ? 'Click positions, or drag across a section' : 'Tip: drag across positions to select a section'),
+    nSel ? h('span', { class: 'small muted' }, `${nSel} selected`) : h('span', { class: 'small faint' }, sel.on ? 'Click positions, or drag across a section' : 'Drag to select a section.' + (matchMedia('(hover: hover)').matches ? ' To paste from Excel, point at a position and press ' + PASTE_KEY : '')),
     selEmpty.length ? h('button', { class: 'btn sm primary', onclick: () => openItemForm({ m, box, positions: selEmpty.map(k => k.split(',').map(Number)) }) }, `+ Add item to ${plural(selEmpty.length, 'position')}`) : null,
+    selItems.length ? h('button', { class: 'btn sm', onclick: () => openBulkEdit(m, box, selItems) }, `Edit ${plural(selItems.length, 'item')}`) : null,
     selItems.length ? h('button', { class: 'btn sm danger', onclick: () => removeDialog(selItems, () => { sel.cells.clear(); refresh(); }) }, `Remove ${plural(selItems.length, 'item')}`) : null,
     nSel ? h('button', { class: 'btn sm ghost', onclick: () => { sel.cells.clear(); refresh(); } }, 'Clear') : null);
 
@@ -1326,6 +1336,79 @@ function enableBoxDragSelect(grid, box) {
   });
 }
 const boxDrag = { active: false, suppressClickUntil: 0 };
+
+// ---------- Paste a section from Excel / Google Sheets into a box ----------
+/** Spreadsheet clipboard text (tabs + newlines, quoted when a cell contains them) → rows of cells. */
+function parseSheet(text) {
+  const t = String(text || '').replace(/\r\n?/g, '\n');
+  let rows = [], row = [], cell = '', quoted = false;
+  for (let i = 0; i < t.length; i++) {
+    const ch = t[i];
+    if (quoted) {
+      if (ch !== '"') cell += ch;
+      else if (t[i + 1] === '"') { cell += '"'; i++; }
+      else quoted = false;
+    } else if (ch === '"' && cell === '') quoted = true;
+    else if (ch === '\t') { row.push(cell); cell = ''; }
+    else if (ch === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; }
+    else cell += ch;
+  }
+  if (quoted) rows = t.split('\n').map(l => l.split('\t'));   // a stray quote: read it literally
+  else { row.push(cell); rows.push(row); }
+  rows = rows.map(r => r.map(v => v.replace(/\s+/g, ' ').trim()));
+  while (rows.length && rows[rows.length - 1].every(v => !v)) rows.pop();
+  const width = Math.max(0, ...rows.map(r => r.reduce((w, v, i) => v ? i + 1 : w, 0)));
+  return rows.map(r => Array.from({ length: width }, (_, i) => r[i] || ''));
+}
+const PASTE_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘V' : 'Ctrl+V';
+/** Paste spreadsheet cells straight into a box: at the selection's top-left, else the position under the mouse. */
+async function pasteIntoBox(m, box, text) {
+  const R = box.grid_rows, C = box.grid_cols;
+  const picked = [...state.boxSel.cells].map(k => k.split(',').map(Number));
+  const limit = picked.length > 1 ? new Set(state.boxSel.cells) : null;   // a selected section is the paste area
+  const anchor = picked.length ? [Math.min(...picked.map(p => p[0])), Math.min(...picked.map(p => p[1]))] : state.boxHover;
+  if (!anchor) { toast('Point at a position in the box, or select one, then paste', true); return; }
+  const [r0, c0] = anchor;
+  const sheet = parseSheet(text), tall = sheet.length, wide = sheet[0]?.length || 0;
+  const cells = [];
+  sheet.forEach((row, i) => row.forEach((name, j) => { if (name) cells.push({ r: r0 + i, c: c0 + j, name }); }));
+  if (!cells.length) return;
+  if (cells.some(x => x.r >= R || x.c >= C)) { toast(`Nothing pasted: this ${tall} × ${wide} section doesn't fit. Only ${R - r0} × ${C - c0} positions are available from ${posLabel(box, r0, c0)}.`, true); return; }
+  if (limit && cells.some(x => !limit.has(x.r + ',' + x.c))) { toast(`Nothing pasted: this ${tall} × ${wide} section doesn't fit inside the ${limit.size} selected positions.`, true); return; }
+  if (cells.some(x => x.name.length > 200)) { toast('Nothing pasted: a cell is longer than the 200-character limit for item names.', true); return; }
+  const existing = new Map((m.byBox.get(box.id) || []).map(it => [it.pos_row + ',' + it.pos_col, it]));
+  const over = cells.map(x => [x, existing.get(x.r + ',' + x.c)]).filter(([x, old]) => old && old.name !== x.name).map(([, old]) => old);
+  if (cells.every(x => existing.get(x.r + ',' + x.c)?.name === x.name)) { toast('Those positions already match'); return; }
+  const send = async overwrite => {
+    try {
+      const r = await api('POST', '/api/items/paste', { node_id: box.id, category_id: null, cells, overwrite_ids: overwrite ? over.map(it => it.id) : [] });
+      if (r.conflicts) { toast('This box just changed, so nothing was pasted. Try again.', true); refresh(); return false; }
+      state.boxSel.cells.clear();
+      toast(`Pasted ${plural(r.created, 'item')} at ${posLabel(box, r0, c0)}${r.replaced ? ` (${r.replaced} replaced)` : ''}`);
+      refresh();
+      return true;
+    } catch (x) { toast(x.message, true); return false; }
+  };
+  if (!over.length) { await send(false); return; }
+  const go = h('button', { class: 'btn danger', onclick: async () => { go.disabled = true; await send(true); close(); } }, `Replace ${plural(over.length, 'item')}`);
+  const close = openModal({ title: `Replace ${plural(over.length, 'item')}?`,
+    body: h('div', { class: 'stack' },
+      h('p', null, `Pasting at ${posLabel(box, r0, c0)} would replace:`),
+      h('ul', { class: 'small' }, over.slice(0, 12).map(it => h('li', null, `${posLabel(box, it.pos_row, it.pos_col)}: ${it.name}`)),
+        over.length > 12 ? h('li', null, `and ${over.length - 12} more`) : null),
+      h('p', { class: 'small muted' }, 'Replaced items are logged as removed. You can undo the whole paste from the Log.')),
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), go] });
+}
+// Cmd/Ctrl+V on a box page pastes into the box (typing fields and open dialogs keep normal paste).
+document.addEventListener('paste', e => {
+  const ctx = state.boxPaste;
+  if (!ctx || state.moving || document.querySelector('.modal-back')) return;
+  if (e.target.closest?.('input, textarea, select, [contenteditable]')) return;
+  const text = e.clipboardData?.getData('text/plain');
+  if (!text || !text.trim()) return;
+  e.preventDefault();
+  pasteIntoBox(ctx.m, ctx.box, text);
+});
 async function onCell(e, m, box, r, c, it) {
   if (Date.now() < boxDrag.suppressClickUntil) return;   // the click that ends a drag-selection
   const key = r + ',' + c, sel = state.boxSel;
@@ -2043,6 +2126,111 @@ function openItemForm(opts) {
     title: editing ? `Edit ${item.name}` : (box ? 'Add item' : 'Add loose item'), body: form, wide: true,
     foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), h('button', { class: 'btn primary', onclick: save }, editing ? 'Save' : 'Add')],
   });
+}
+
+/** Edit several items at once. Only ticked fields change; typing in a field ticks it. */
+function openBulkEdit(m, box, items) {
+  const MIXED = '__mixed__';
+  const shared = get => {
+    const vals = new Set(items.map(it => String(get(it) ?? '')));
+    return vals.size === 1 ? { value: [...vals][0], mixed: false } : { value: '', mixed: true };
+  };
+  const err = h('p', { class: 'error' });
+  const summary = h('p', { class: 'small muted' });
+  const applyBtn = h('button', { class: 'btn primary' }, 'Apply');
+  const rows = new Map();
+  const update = () => {
+    const on = [...rows.values()].filter(x => x.check.checked);
+    applyBtn.disabled = !on.length;
+    applyBtn.textContent = on.length ? `Apply to ${plural(items.length, 'item')}` : 'Apply';
+    const cleared = on.filter(x => !x.el.value).map(x => x.label);
+    summary.textContent = on.length
+      ? `Changing ${on.map(x => x.label).join(', ')}.${cleared.length ? ` Clearing: ${cleared.join(', ')}.` : ''} Everything else stays as it is.`
+      : 'Tick a field, or start typing in one. Unticked fields stay as they are.';
+  };
+  const bulkRow = (key, label, el, cur, cls, onChange) => {
+    if (cur.mixed && el.tagName === 'SELECT') { el.prepend(h('option', { value: MIXED, hidden: true }, 'Mixed values')); el.value = MIXED; }
+    else { el.value = cur.value; if (cur.mixed && el.type !== 'date') el.placeholder = 'Mixed values'; }
+    const start = el.value;
+    const check = h('input', { type: 'checkbox', 'aria-label': `Change ${label}` });
+    const wrap = h('div', { class: 'bulk-row' + (cls ? ' ' + cls : '') },
+      h('label', { class: 'bulk-check' }, check, h('span', null, label), cur.mixed ? h('span', { class: 'hint' }, 'mixed') : null), el);
+    const paint = () => { wrap.classList.toggle('on', check.checked); update(); onChange && onChange(); };
+    check.addEventListener('change', () => {
+      if (check.checked && el.value === MIXED) el.value = '';
+      if (!check.checked) el.value = start;
+      paint();
+    });
+    const touched = () => { check.checked = true; paint(); };
+    el.addEventListener('input', touched);
+    if (el.tagName === 'SELECT') el.addEventListener('change', touched);
+    rows.set(key, { key, label, el, check });
+    return wrap;
+  };
+  const o = nodeOwner(m, box.id);
+  const inherit = o.owner_id || o.common ? `Inherit — ${ownerName(o.owner_id, o.common)} (from ${o.from})` : 'Unassigned (inherit)';
+  const detailBox = h('div', { class: 'grid2 span-all' });
+  const detailHead = h('h3', { class: 'span-all details-head' }, 'Details');
+  const catSel = categorySelect(null);
+  let lastCat = null;
+  const drawDetails = () => {
+    const newCat = rows.get('category_id')?.check.checked ? catSel.value : null;
+    if (rows.has('category_id') && newCat === lastCat && detailBox.childElementCount) return;
+    lastCat = newCat;
+    const typed = {};
+    for (const [k, x] of [...rows]) if (k.startsWith('x:')) { if (x.check.checked) typed[k] = x.el.value; rows.delete(k); }
+    const fields = new Map();
+    for (const it of items) for (const f of itemFields(newCat !== null ? newCat : it.category_id, it)) if (!fields.has(f.key)) fields.set(f.key, f);
+    const built = [...fields.values()].map(f => {
+      const key = 'x:' + f.key, cur = shared(it => itemValue(it, f.key));
+      const el = fieldInput(f, cur.value).querySelector('[data-fkey]');
+      const row = bulkRow(key, f.label, el, cur, f.type === 'longtext' ? 'span-all' : null);
+      if (key in typed) { el.value = typed[key]; rows.get(key).check.checked = true; row.classList.add('on'); }
+      return row;
+    });
+    detailBox.replaceChildren(...built);
+    detailHead.hidden = detailBox.hidden = !built.length;
+    update();
+  };
+  const first = items[0];
+  const form = h('form', { class: 'stack' },
+    h('p', { class: 'small muted' }, `${nodeLabel(box)} · ${items.map(it => posLabel(box, it.pos_row, it.pos_col)).join(', ')}`),
+    h('div', { class: 'grid2' },
+      bulkRow('category_id', 'Category', catSel, shared(it => it.category_id), 'span-all', drawDetails),
+      bulkRow('owner', 'Owner', ownerSelect(first.owner_id, first.is_common, inherit), shared(it => it.is_common ? 'common' : it.owner_id || '')),
+      bulkRow('quantity', 'Quantity', inp('quantity', ''), shared(it => it.quantity)),
+      bulkRow('name', 'Name', inp('name', ''), shared(it => it.name), 'span-all'),
+      detailHead, detailBox,
+      bulkRow('date_added', 'Date added', inp('date_added', '', { type: 'date' }), shared(it => it.date_added)),
+      bulkRow('expiry_date', 'Expiry date', inp('expiry_date', '', { type: 'date' }), shared(it => it.expiry_date)),
+      bulkRow('notes', 'Notes', h('textarea', { name: 'notes', class: 'input', rows: 2 }), shared(it => it.notes), 'span-all')),
+    summary, err);
+  const save = async () => {
+    err.textContent = '';
+    const changes = {}, extra = {};
+    for (const x of rows.values()) {
+      if (!x.check.checked) continue;
+      const v = x.el.value.trim();
+      if ((x.key === 'name' || x.key === 'date_added') && !v) { err.textContent = `${x.label} can't be blank.`; return; }
+      if (x.key === 'category_id') changes.category_id = v ? +v : null;
+      else if (x.key === 'owner') Object.assign(changes, ownerPayload(v));
+      else if (x.key.startsWith('x:')) { const k = x.key.slice(2); if (COLUMN_FIELDS.includes(k)) changes[k] = v; else extra[k] = v; }
+      else changes[x.key] = v;
+    }
+    try {
+      const r = await api('POST', '/api/items/bulk-edit', { item_ids: items.map(it => it.id), changes, extra });
+      close();
+      state.boxSel.cells.clear();
+      toast(r.updated ? `Updated ${plural(r.updated, 'item')}` : 'Nothing needed changing');
+      refresh();
+    } catch (x) { err.textContent = x.message; }
+  };
+  form.onsubmit = e => { e.preventDefault(); save(); };
+  applyBtn.onclick = save;
+  drawDetails();
+  update();
+  const close = openModal({ title: `Edit ${plural(items.length, 'item')}`, body: form, wide: true,
+    foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), applyBtn] });
 }
 
 async function openItem(id) {
