@@ -1899,8 +1899,10 @@ def undo_activity(ctx):
     for r in batch:
         conn.execute("UPDATE activity SET undone_at = datetime('now'), undone_by = ? WHERE id = ?", (ctx["user"]["id"], r["id"]))
     what = a["summary"] if len(batch) == 1 else f"{len(batch)} changes ({batch[-1]['summary']}…)"
+    # Undoing an add deletes the item, so only link the log entry to an item that still exists.
+    item_id = a["item_id"] if len(batch) == 1 and conn.execute("SELECT 1 FROM items WHERE id = ?", (a["item_id"],)).fetchone() else None
     conn.execute("INSERT INTO activity (user_id, action, item_id, unit_id, summary) VALUES (?,?,?,?,?)",
-                 (ctx["user"]["id"], "undo", a["item_id"] if len(batch) == 1 else None, a["unit_id"], f"Undid: {lowerfirst(what)}"))
+                 (ctx["user"]["id"], "undo", item_id, a["unit_id"], f"Undid: {lowerfirst(what)}"))
     conn.commit()
     return {"ok": True, "count": len(batch)}
 

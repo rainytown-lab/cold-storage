@@ -43,7 +43,7 @@ const state = {
   me: null, lab: 'Cold Storage', users: [], usersById: new Map(), cats: [], catsById: new Map(),
   moving: null,                 // {id, name} while an item is being moved
   highlight: '',                // owner filter in the diagram: '' | 'common' | userId
-  boxSel: { box: null, cells: new Set(), on: false },
+  boxSel: { box: null, cells: new Set() },
   pieceSel: { unit: null, holder: null, ids: new Set(), on: false },   // selected racks / loose spaces
   renderSeq: 0,
 };
@@ -242,7 +242,7 @@ async function route() {
   if (!state.me) return;
   const seq = ++state.renderSeq;
   state.boxPaste = null;
-  state.boxHover = null;
+  state.boxUI = null;
   const { parts, query } = parseHash();
   const top = parts[0] || '';
   for (const a of document.querySelectorAll('#nav a')) {
@@ -702,7 +702,7 @@ async function viewUnit(uid, nid, query) {
   if (nid && !node) throw new Error('That part of the layout no longer exists.');
   const t = TYPES[m.unit.type];
   if (state.pieceSel.unit !== uid) state.pieceSel = { unit: uid, holder: null, ids: new Set(), on: false };
-  if (!node || node.level !== 'box' || state.boxSel.box !== node.id) state.boxSel = { box: node?.level === 'box' ? node.id : null, cells: new Set(), on: false };
+  if (!node || node.level !== 'box' || state.boxSel.box !== node.id) state.boxSel = { box: node?.level === 'box' ? node.id : null, cells: new Set() };
 
   const chain = node ? chainOf(m, node.id) : [];
   const crumbs = h('div', { class: 'crumbs' },
@@ -743,7 +743,7 @@ async function viewUnit(uid, nid, query) {
       h('div', { class: 'diagram' + (node && node.level === 'box' ? ' wide' : ''), 'data-dnd': true, 'data-unit': uid },
         h('div', { class: 'toolbar' }, hl, h('span', { class: 'spacer' })), legend(m),
         !node || node.level === 'shelf' ? pieceToolbar(m) : null, diagram),
-      h('div', { class: 'side' }, node ? nodeSide(m, node) : unitSide(m))));
+      h('div', { class: 'side' }, node?.level === 'box' ? state.boxUI.panel : null, node ? nodeSide(m, node) : unitSide(m))));
 }
 /** "You are here": a tiny map of the whole unit (and of the rack, once inside one), current spot highlighted. */
 function locator(m, node) {
@@ -1228,7 +1228,7 @@ function boxView(m, box, query) {
   const hlId = query.hl ? +query.hl : null;
   const R = box.grid_rows, C = box.grid_cols;
   const compact = C > 12;
-  const g = h('div', { class: 'box-grid' + (compact ? ' compact' : '') + (sel.on ? ' selecting' : ''), style: { gridTemplateColumns: `22px repeat(${C}, minmax(0, 1fr))` } });
+  const g = h('div', { class: 'box-grid' + (compact ? ' compact' : ''), 'data-box-keep': true, style: { gridTemplateColumns: `22px repeat(${C}, minmax(0, 1fr))` } });
   g.append(h('div'));
   for (let c = 0; c < C; c++) g.append(h('div', { class: 'hdr' }, box.label_style === 'number' ? '' : c + 1));
   for (let r = 0; r < R; r++) {
@@ -1247,53 +1247,121 @@ function boxView(m, box, query) {
     }
   }
   enableBoxDragSelect(g, box);
-  g.addEventListener('pointerover', e => {
-    if (e.pointerType !== 'mouse') return;
-    const el = e.target.closest('.cell');
-    if (el) state.boxHover = [+el.dataset.r, +el.dataset.c];
-  });
-  g.addEventListener('pointerleave', () => { state.boxHover = null; });
   state.boxPaste = { m, box };
-  const nSel = sel.cells.size;
-  const selItems = [...sel.cells].map(k => grid.get(k)).filter(Boolean);
-  const selEmpty = [...sel.cells].filter(k => !grid.has(k));
-  const toolbar = h('div', { class: 'toolbar' },
-    h('button', { class: 'btn sm' + (sel.on ? ' on' : ''), onclick: () => { sel.on = !sel.on; if (!sel.on) sel.cells.clear(); refresh(); } }, sel.on ? 'Done selecting' : 'Select positions'),
-    nSel ? h('span', { class: 'small muted' }, `${nSel} selected`) : h('span', { class: 'small faint' }, sel.on ? 'Click positions, or drag across a section' : 'Drag to select a section.' + (matchMedia('(hover: hover)').matches ? ' To paste from Excel, point at a position and press ' + PASTE_KEY : '')),
-    selEmpty.length ? h('button', { class: 'btn sm primary', onclick: () => openItemForm({ m, box, positions: selEmpty.map(k => k.split(',').map(Number)) }) }, `+ Add item to ${plural(selEmpty.length, 'position')}`) : null,
-    selItems.length ? h('button', { class: 'btn sm', onclick: () => openBulkEdit(m, box, selItems) }, `Edit ${plural(selItems.length, 'item')}`) : null,
-    selItems.length ? h('button', { class: 'btn sm danger', onclick: () => removeDialog(selItems, () => { sel.cells.clear(); refresh(); }) }, `Remove ${plural(selItems.length, 'item')}`) : null,
-    nSel ? h('button', { class: 'btn sm ghost', onclick: () => { sel.cells.clear(); refresh(); } }, 'Clear') : null);
-
+  const ui = state.boxUI = { m, box, grid, g, panelKey: null,
+    toolbar: h('div', { class: 'toolbar', 'data-box-keep': true }),
+    panel: h('div', { class: 'card pos-panel', 'data-box-keep': true, hidden: true }) };
+  paintBoxSelection();
   const sorted = [...items].sort((a, b) => a.pos_row - b.pos_row || a.pos_col - b.pos_col);
   return h('div', { class: 'box-wrap' + (state.moving ? ' moving' : '') },
-    toolbar, g,
-    h('div', { class: 'card', style: { marginTop: '16px' } },
+    ui.toolbar, g,
+    h('div', { class: 'card', 'data-box-keep': true, style: { marginTop: '16px' } },
       h('div', { class: 'card-head' }, h('h2', null, `Contents (${items.length}/${R * C})`)),
       sorted.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'list' },
         h('thead', null, h('tr', null, ['Pos', 'Item', 'Category', 'Owner', 'Qty', 'Added'].map(x => h('th', null, x)))),
         h('tbody', null, sorted.map(it => {
           const o = itemOwner(m, it);
-          return h('tr', { class: 'clickable', onclick: () => openItem(it.id) },
+          return h('tr', { class: 'clickable', onclick: () => selectBoxCell(it.pos_row, it.pos_col) },
             h('td', { class: 'mono' }, posLabel(box, it.pos_row, it.pos_col)), h('td', { class: 'nm' }, it.name),
             h('td', null, catLabel(it.category_id)), h('td', null, ownerChip(o.owner_id, o.common, { short: true, inherit: o.from !== 'item' })),
             h('td', null, it.quantity || ''), h('td', { class: 'small muted' }, fmtDate(it.date_added)));
-        })))) : h('p', { class: 'empty-note' }, 'Empty box. Click a position above to add an item.')));
+        })))) : h('p', { class: 'empty-note' }, 'Empty box. Select a position above to add an item.')));
 }
+function selectBoxCell(r, c) {
+  state.boxSel.cells.clear();
+  state.boxSel.cells.add(r + ',' + c);
+  paintBoxSelection();
+}
+function clearBoxSelection() {
+  state.boxSel.cells.clear();
+  paintBoxSelection();
+}
+/** Show the current selection on the grid, toolbar and side panel, without reloading the page. */
+function paintBoxSelection() {
+  const ui = state.boxUI;
+  if (!ui) return;
+  const sel = state.boxSel;
+  for (const el of ui.g.querySelectorAll('.cell')) el.classList.toggle('sel', sel.cells.has(el.dataset.r + ',' + el.dataset.c));
+  ui.toolbar.replaceChildren(...boxToolbarParts(ui));
+  paintPositionPanel(ui);
+}
+function boxToolbarParts(ui) {
+  const { m, box, grid } = ui, sel = state.boxSel, keys = [...sel.cells], n = keys.length;
+  if (!n) {
+    const mouse = matchMedia('(hover: hover)').matches;
+    return [h('span', { class: 'small faint' }, mouse
+      ? `Click a position to select it, or drag across several. Press ${PASTE_KEY} to paste from Excel into the selection.`
+      : 'Tap a position to select it. Press and hold, then drag, to select several.')];
+  }
+  const items = keys.map(k => grid.get(k)).filter(Boolean), empty = keys.filter(k => !grid.has(k));
+  const [r, c] = keys[0].split(',').map(Number);
+  return [
+    h('span', { class: 'small muted' }, n === 1 ? `${posLabel(box, r, c)} selected` : `${n} selected`),
+    n > 1 && empty.length ? h('button', { class: 'btn sm primary', onclick: () => openItemForm({ m, box, positions: empty.map(k => k.split(',').map(Number)) }) }, `+ Add item to ${plural(empty.length, 'position')}`) : null,
+    n > 1 && items.length ? h('button', { class: 'btn sm', onclick: () => openBulkEdit(m, box, items) }, `Edit ${plural(items.length, 'item')}`) : null,
+    n > 1 && items.length ? h('button', { class: 'btn sm danger', onclick: () => removeDialog(items, () => { sel.cells.clear(); refresh(); }) }, `Remove ${plural(items.length, 'item')}`) : null,
+    h('button', { class: 'btn sm ghost', onclick: clearBoxSelection }, 'Deselect all'),
+  ].filter(Boolean);
+}
+/** Side panel for a single selected position: what's in it, or a way to add something. */
+async function paintPositionPanel(ui) {
+  const keys = [...state.boxSel.cells], key = keys.length === 1 ? keys[0] : null, { panel, box, m } = ui;
+  if (ui.panelKey === key) return;
+  ui.panelKey = key;
+  panel.hidden = !key;
+  if (!key) { panel.replaceChildren(); return; }
+  const [r, c] = key.split(',').map(Number), pl = posLabel(box, r, c), summary = ui.grid.get(key);
+  const head = title => h('div', { class: 'card-head' },
+    h('div', { style: { minWidth: 0 } }, h('div', { class: 'small muted' }, `${nodeLabel(box)} · ${pl}`), h('h2', { class: 'pos-title' }, title)),
+    h('button', { class: 'btn sm ghost', 'aria-label': 'Deselect', onclick: clearBoxSelection }, '✕'));
+  if (!summary) {
+    panel.replaceChildren(head('Empty position'),
+      h('button', { class: 'btn primary', onclick: () => openItemForm({ m, box, positions: [[r, c]], allowFill: true }) }, '+ Add item'));
+    return;
+  }
+  panel.replaceChildren(head(summary.name), h('p', { class: 'small faint' }, 'Loading…'));
+  let it;
+  try { it = await api('GET', `/api/items/${summary.id}`); }
+  catch (e) { if (ui.panelKey === key) panel.replaceChildren(head(summary.name), h('p', { class: 'error' }, e.message)); return; }
+  if (ui.panelKey !== key || state.boxUI !== ui) return;
+  panel.replaceChildren(...[head(it.name),
+    h('dl', { class: 'kv' }, itemKv(it).filter(([k]) => k !== 'Location').map(([k, v]) => [h('dt', null, k), h('dd', null, v)])),
+    it.notes ? h('div', { class: 'pos-section' }, h('h3', null, 'Notes'), h('p', { style: { whiteSpace: 'pre-wrap', marginTop: '4px' } }, it.notes)) : null,
+    h('div', { class: 'row pos-actions' },
+      h('button', { class: 'btn sm', onclick: () => openItemForm({ item: it }) }, 'Edit'),
+      h('button', { class: 'btn sm', onclick: () => { state.boxSel.cells.clear(); state.moving = { id: it.id, name: it.name }; renderBanner(); toast('Pick the new spot'); refresh(); } }, 'Move'),
+      h('button', { class: 'btn sm danger', onclick: () => removeDialog([it], refresh) }, 'Remove…')),
+    h('details', { class: 'pos-section' }, h('summary', null, `History (${it.history.length})`),
+      h('ul', { class: 'feed' }, it.history.map(a => h('li', null,
+        h('span', { class: 'act ' + a.action.split('.')[1] }), h('span', { class: 'when', title: a.at + ' UTC' }, fmtWhen(a.at)),
+        h('span', null, h('span', { class: 'who' }, a.user_name || 'Someone'), ' ', lowerFirst(a.summary)))))),
+  ].filter(Boolean));
+}
+// Clicking anywhere outside the box (or pressing Esc) clears the selection.
+document.addEventListener('click', e => {
+  if (!state.boxUI || !state.boxSel.cells.size || Date.now() < boxDrag.suppressClickUntil) return;
+  if (!e.target.isConnected || e.target.closest('[data-box-keep], .modal-back, #toast, select, input, textarea')) return;
+  clearBoxSelection();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && state.boxUI && !boxDrag.active && !document.querySelector('.modal-back')) clearBoxSelection();
+});
 function catLabel(id) {
   const c = state.catsById.get(id);
   return c ? h('span', { class: 'row', style: { gap: '6px', flexWrap: 'nowrap' } }, h('i', { class: 'dot', style: { background: c.color } }), c.name) : h('span', { class: 'faint' }, '—');
 }
-/** Drag across a box to select a rectangle of positions. Mouse: any time. Touch: in "Select positions"
- *  mode, so a normal swipe still scrolls the page. Shift/Cmd or select mode adds to the selection. */
+/** Drag across a box to select a rectangle of positions. Touch: press and hold first, so a normal swipe
+ *  still scrolls the page. Shift/Cmd adds to the selection. */
 function enableBoxDragSelect(grid, box) {
   grid.addEventListener('pointerdown', e => {
     if (e.button !== 0 || state.moving || boxDrag.active) return;
     const start = e.target.closest('.cell');
     const sel = state.boxSel;
-    if (!start || (e.pointerType !== 'mouse' && !sel.on)) return;
+    if (!start) return;
+    const touch = e.pointerType !== 'mouse';
+    let held = !touch, holdTimer = null;
     const r0 = +start.dataset.r, c0 = +start.dataset.c;
-    const adding = sel.on || e.shiftKey || e.metaKey || e.ctrlKey;
+    const adding = e.shiftKey || e.metaKey || e.ctrlKey;
     const cells = [...grid.querySelectorAll('.cell')];
     let rect = null;
     // The position under the pointer, clamped so dragging past an edge selects up to that edge.
@@ -1307,11 +1375,18 @@ function enableBoxDragSelect(grid, box) {
     const paint = () => { grid.classList.toggle('replacing', !!rect && !adding); for (const el of cells) el.classList.toggle('sel-preview', !!inRect(el)); };
     const stop = () => {
       boxDrag.active = false;
+      clearTimeout(holdTimer);
+      document.removeEventListener('touchmove', noScroll);
+      grid.removeEventListener('contextmenu', noMenu);
       document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', up);
       document.removeEventListener('pointercancel', cancel); document.removeEventListener('keydown', key);
     };
     const move = ev => {
       if (ev.pointerId !== e.pointerId) return;
+      if (!held) {       // a swipe before the hold finishes is a normal scroll
+        if (Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) > 8) stop();
+        return;
+      }
       const [r, c] = at(ev.clientX, ev.clientY);
       if (!rect && r === r0 && c === c0) return;       // still a plain click
       rect = [Math.min(r0, r), Math.min(c0, c), Math.max(r0, r), Math.max(c0, c)];
@@ -1325,12 +1400,20 @@ function enableBoxDragSelect(grid, box) {
       boxDrag.suppressClickUntil = Date.now() + 300;
       if (!adding) sel.cells.clear();
       for (let r = rect[0]; r <= rect[2]; r++) for (let c = rect[1]; c <= rect[3]; c++) sel.cells.add(r + ',' + c);
-      sel.on = true;
-      refresh();
+      rect = null;
+      paint();
+      paintBoxSelection();
     };
+    const noScroll = ev => { if (held) ev.preventDefault(); };
+    const noMenu = ev => ev.preventDefault();
     const cancel = () => { stop(); rect = null; paint(); };
     const key = ev => { if (ev.key === 'Escape') { if (rect) boxDrag.suppressClickUntil = Date.now() + 300; cancel(); } };
     boxDrag.active = true;
+    if (touch) {
+      document.addEventListener('touchmove', noScroll, { passive: false });
+      grid.addEventListener('contextmenu', noMenu);
+      holdTimer = setTimeout(() => { held = true; rect = [r0, c0, r0, c0]; paint(); }, 320);
+    }
     document.addEventListener('pointermove', move); document.addEventListener('pointerup', up);
     document.addEventListener('pointercancel', cancel); document.addEventListener('keydown', key);
   });
@@ -1339,7 +1422,7 @@ const boxDrag = { active: false, suppressClickUntil: 0 };
 
 // ---------- Paste a section from Excel / Google Sheets into a box ----------
 /** Spreadsheet clipboard text (tabs + newlines, quoted when a cell contains them) → rows of cells. */
-function parseSheet(text) {
+function parseSheet(text, keepBlanks = false) {
   const t = String(text || '').replace(/\r\n?/g, '\n');
   let rows = [], row = [], cell = '', quoted = false;
   for (let i = 0; i < t.length; i++) {
@@ -1356,25 +1439,32 @@ function parseSheet(text) {
   if (quoted) rows = t.split('\n').map(l => l.split('\t'));   // a stray quote: read it literally
   else { row.push(cell); rows.push(row); }
   rows = rows.map(r => r.map(v => v.replace(/\s+/g, ' ').trim()));
+  if (keepBlanks) {   // the exact copied range: only the clipboard's final line break is dropped
+    if (rows.length > 1 && rows[rows.length - 1].length === 1 && !rows[rows.length - 1][0]) rows.pop();
+    const full = Math.max(...rows.map(r => r.length));
+    return rows.map(r => Array.from({ length: full }, (_, i) => r[i] || ''));
+  }
   while (rows.length && rows[rows.length - 1].every(v => !v)) rows.pop();
   const width = Math.max(0, ...rows.map(r => r.reduce((w, v, i) => v ? i + 1 : w, 0)));
   return rows.map(r => Array.from({ length: width }, (_, i) => r[i] || ''));
 }
 const PASTE_KEY = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘V' : 'Ctrl+V';
-/** Paste spreadsheet cells straight into a box: at the selection's top-left, else the position under the mouse. */
+/** Paste spreadsheet cells into a box. One position selected: it's the top-left corner.
+ *  Several selected: they must form a rectangle the same size as the copied section. */
 async function pasteIntoBox(m, box, text) {
   const R = box.grid_rows, C = box.grid_cols;
   const picked = [...state.boxSel.cells].map(k => k.split(',').map(Number));
-  const limit = picked.length > 1 ? new Set(state.boxSel.cells) : null;   // a selected section is the paste area
-  const anchor = picked.length ? [Math.min(...picked.map(p => p[0])), Math.min(...picked.map(p => p[1]))] : state.boxHover;
-  if (!anchor) { toast('Point at a position in the box, or select one, then paste', true); return; }
-  const [r0, c0] = anchor;
-  const sheet = parseSheet(text), tall = sheet.length, wide = sheet[0]?.length || 0;
+  if (!picked.length) { toast('Select a position in the box first, then paste', true); return; }
+  const r0 = Math.min(...picked.map(p => p[0])), c0 = Math.min(...picked.map(p => p[1]));
+  const copied = parseSheet(text, true), tall = copied.length, wide = copied[0]?.length || 0;
   const cells = [];
-  sheet.forEach((row, i) => row.forEach((name, j) => { if (name) cells.push({ r: r0 + i, c: c0 + j, name }); }));
+  copied.forEach((row, i) => row.forEach((name, j) => { if (name) cells.push({ r: r0 + i, c: c0 + j, name }); }));
   if (!cells.length) return;
-  if (cells.some(x => x.r >= R || x.c >= C)) { toast(`Nothing pasted: this ${tall} × ${wide} section doesn't fit. Only ${R - r0} × ${C - c0} positions are available from ${posLabel(box, r0, c0)}.`, true); return; }
-  if (limit && cells.some(x => !limit.has(x.r + ',' + x.c))) { toast(`Nothing pasted: this ${tall} × ${wide} section doesn't fit inside the ${limit.size} selected positions.`, true); return; }
+  if (picked.length > 1) {
+    const selTall = Math.max(...picked.map(p => p[0])) - r0 + 1, selWide = Math.max(...picked.map(p => p[1])) - c0 + 1;
+    if (selTall * selWide !== picked.length) { toast(`Nothing pasted: the selection isn't a solid rectangle. The copied section is ${tall} × ${wide}.`, true); return; }
+    if (selTall !== tall || selWide !== wide) { toast(`Nothing pasted: you copied ${tall} × ${wide}, but selected ${selTall} × ${selWide}.`, true); return; }
+  } else if (cells.some(x => x.r >= R || x.c >= C)) { toast(`Nothing pasted: this ${tall} × ${wide} section doesn't fit. Only ${R - r0} × ${C - c0} positions are available from ${posLabel(box, r0, c0)}.`, true); return; }
   if (cells.some(x => x.name.length > 200)) { toast('Nothing pasted: a cell is longer than the 200-character limit for item names.', true); return; }
   const existing = new Map((m.byBox.get(box.id) || []).map(it => [it.pos_row + ',' + it.pos_col, it]));
   const over = cells.map(x => [x, existing.get(x.r + ',' + x.c)]).filter(([x, old]) => old && old.name !== x.name).map(([, old]) => old);
@@ -1384,6 +1474,7 @@ async function pasteIntoBox(m, box, text) {
       const r = await api('POST', '/api/items/paste', { node_id: box.id, category_id: null, cells, overwrite_ids: overwrite ? over.map(it => it.id) : [] });
       if (r.conflicts) { toast('This box just changed, so nothing was pasted. Try again.', true); refresh(); return false; }
       state.boxSel.cells.clear();
+      for (const x of cells) state.boxSel.cells.add(x.r + ',' + x.c);   // leave what was pasted selected, ready to edit
       toast(`Pasted ${plural(r.created, 'item')} at ${posLabel(box, r0, c0)}${r.replaced ? ` (${r.replaced} replaced)` : ''}`);
       refresh();
       return true;
@@ -1415,16 +1506,16 @@ async function onCell(e, m, box, r, c, it) {
   if (state.moving && !it) {
     const mv = state.moving;
     const ok = await attempt(() => api('POST', `/api/items/${mv.id}/move`, { unit_id: m.unit.id, node_id: box.id, pos: [r, c] }), `Moved to ${nodeLabel(box)} ${posLabel(box, r, c)}`);
-    if (ok) { state.moving = null; refresh(); }
+    if (ok) { state.moving = null; sel.cells.clear(); sel.cells.add(key); refresh(); }
     return;
   }
-  if (sel.on || e.shiftKey || e.metaKey || e.ctrlKey) {
+  if (state.moving) return;
+  if (e.shiftKey || e.metaKey || e.ctrlKey) {
     sel.cells.has(key) ? sel.cells.delete(key) : sel.cells.add(key);
-    refresh();
+    paintBoxSelection();
     return;
   }
-  if (it) openItem(it.id);
-  else openItemForm({ m, box, positions: [[r, c]], allowFill: true });
+  selectBoxCell(r, c);
 }
 
 // ---------- Side panels ----------
@@ -2233,16 +2324,11 @@ function openBulkEdit(m, box, items) {
     foot: [h('button', { class: 'btn', onclick: () => close() }, 'Cancel'), applyBtn] });
 }
 
-async function openItem(id) {
-  let it;
-  try { it = await api('GET', `/api/items/${id}`); } catch (e) { toast(e.message, true); return; }
-  const loc = it.location;
-  const boxPart = [...loc.parts].reverse().find(p => p.kind === 'box');
-  const anyPart = loc.parts[loc.parts.length - 1];
-  const showHref = it.status === 'stored' && anyPart ? (boxPart ? `#/unit/${loc.parts[0].id}/n/${boxPart.id}?hl=${it.id}` : (anyPart.kind === 'unit' ? `#/unit/${anyPart.id}` : `#/unit/${loc.parts[0].id}/n/${anyPart.id}`)) : null;
-  const removed = it.status === 'removed';
+/** The label/value rows describing an item, for the item popup and the box side panel. */
+function itemKv(it) {
+  const loc = it.location, removed = it.status === 'removed';
   const ownerEl = ownerChip(it.eff_owner_id, it.eff_common, { inherit: it.owner_from !== 'item', none: h('span', { class: 'faint' }, 'Unassigned') });
-  const kv = [
+  return [
     ['Category', catLabel(it.category_id)],
     ['Owner', h('span', null, ownerEl, it.owner_from && it.owner_from !== 'item' ? h('span', { class: 'small faint' }, ` via ${it.owner_from}`) : null)],
     ['Location', h('span', null, removed ? h('span', { class: 'muted' }, 'was in ') : null, removed ? it.last_location : loc.text)],
@@ -2253,6 +2339,17 @@ async function openItem(id) {
     ['Added', `${fmtDate(it.date_added)}${it.added_by_name ? ' by ' + it.added_by_name : ''}`],
     removed ? ['Removed', `${fmtDate(it.date_removed)}${it.removed_by_name ? ' by ' + it.removed_by_name : ''}${it.removal_reason ? ' — ' + it.removal_reason : ''}`] : null,
   ].filter(x => x && x[1]);
+}
+
+async function openItem(id) {
+  let it;
+  try { it = await api('GET', `/api/items/${id}`); } catch (e) { toast(e.message, true); return; }
+  const loc = it.location;
+  const boxPart = [...loc.parts].reverse().find(p => p.kind === 'box');
+  const anyPart = loc.parts[loc.parts.length - 1];
+  const showHref = it.status === 'stored' && anyPart ? (boxPart ? `#/unit/${loc.parts[0].id}/n/${boxPart.id}?hl=${it.id}` : (anyPart.kind === 'unit' ? `#/unit/${anyPart.id}` : `#/unit/${loc.parts[0].id}/n/${anyPart.id}`)) : null;
+  const removed = it.status === 'removed';
+  const kv = itemKv(it);
   const close = openModal({
     wide: true,
     title: h('div', { style: { flex: 1, minWidth: 0 } }, h('h2', null, it.name), h('div', { class: 'row small muted', style: { marginTop: '2px' } },

@@ -713,7 +713,6 @@ h1 { font-size: 26px; font-weight: 750; }
 @media (max-width: 560px) { .field-row { grid-template-columns: 1fr auto; } .field-row > select { grid-column: 1 / -1; } }
 
 /* Drag-selecting a section of a box */
-.box-grid.selecting .cell { touch-action: none; }
 .cell.sel-preview { box-shadow: 0 0 0 3px var(--primary) !important; background: var(--primary-soft); z-index: 1; }
 .cell.filled.sel-preview { background: color-mix(in srgb, var(--primary) 22%, var(--surface)); }
 .box-grid.replacing .cell.sel:not(.sel-preview) { box-shadow: none !important; }
@@ -725,3 +724,17 @@ h1 { font-size: 26px; font-weight: 750; }
 .bulk-check { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: var(--text-soft); cursor: pointer; }
 .bulk-check .hint { font-size: 12px; font-weight: 400; color: var(--text-faint); }
 .bulk-row textarea { min-height: 60px; resize: vertical; }
+
+/* Selecting positions: details beside the box (a bottom sheet on narrow screens) */
+.box-grid .cell { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.cell.empty:hover::after { content: none; }
+.side:has(.pos-panel:not([hidden])) { align-self: stretch; }
+.side > .pos-panel { grid-column: 1 / -1; position: sticky; top: 84px; align-self: start; z-index: 5; max-height: calc(100vh - 104px); overflow: auto; }
+.pos-panel[hidden] { display: none; }
+.pos-title { font-size: 18px; overflow-wrap: anywhere; }
+.pos-actions { margin-top: 14px; gap: 8px; }
+.pos-section { margin-top: 14px; }
+.pos-section summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-soft); margin-bottom: 8px; }
+@media (max-width: 1000px) {
+  .side > .pos-panel { position: fixed; left: 8px; right: 8px; top: auto; bottom: 8px; z-index: 40; max-height: 46vh; box-shadow: 0 10px 34px rgba(15, 40, 70, .32); }
+}

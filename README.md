@@ -71,14 +71,15 @@ under **Settings › People**, with a temporary password. Sign out from the top 
   tissue, serum and reagents. Each category's fields can be edited under
   Settings › Item categories › Fields… (text, long text, number, date or dropdown).
   These details show on the item's page, are searchable, and are exported to CSV.
-  Click an empty position to add an item; "Number of tubes" fills the next N
-  positions with aliquots. Drag across a box to select a whole section (on a phone,
-  tap "Select positions" first), or shift-click individual positions, then add or
-  remove in bulk.
-- **Paste from Excel**: copy cells, point at a position in a box (or select a section),
-  and press Cmd/Ctrl+V. Each non-blank cell becomes an item. The paste must fit the box
-  or the selected section. Replacing stored items asks first, logs them as removed, and
-  the whole paste can be undone.
+  Click a position to select it and see its details beside the box; from there you
+  can add an item, and "Number of tubes" fills the next N positions with aliquots.
+  Drag across a box to select a section (on a phone, press and hold first), or
+  shift-click positions, then add, edit or remove in bulk. Click outside the box or
+  use "Deselect all" to clear the selection.
+- **Paste from Excel**: copy cells, select a position in a box, and press Cmd/Ctrl+V.
+  The paste starts at that position. If several positions are selected, they must form
+  a rectangle the same size as the copied section. Replacing stored items asks first,
+  logs them as removed, and the whole paste can be undone.
 - **Edit several items**: select filled positions and choose "Edit N items" to change
   category, owner, quantity, dates, notes or category details. Only ticked fields
   change, and the whole edit can be undone from the Log.
